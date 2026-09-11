@@ -158,6 +158,7 @@ function render(){
   if(state.route === 'dashboard') renderDashboard(main);
   else if(state.route === 'pos') renderPOS(main);
   else if(state.route === 'orders') renderOrders(main);
+  else if(state.route === 'bulkEdit') renderBulkEdit(main);
   else if(state.route === 'products') renderProducts(main);
   else if(state.route === 'customers') renderCustomers(main);
   else if(state.route === 'team') renderTeam(main);
@@ -180,6 +181,7 @@ function renderProducts(main){
       <div style="display:flex;gap:10px;">
         <button class="secondary" onclick="openCategoryModal()">Manage categories</button>
         <button class="secondary" onclick="openImportModal()">Import from Shopify</button>
+        <button class="secondary" onclick="nav('bulkEdit')">Bulk edit pricing</button>
         <button class="gold" onclick="openProductModal()">+ Add product</button>
       </div>
     </div>
@@ -452,9 +454,64 @@ async function deleteProduct(id){
   await loadAll();
 }
 
+// ================= BULK EDIT PRICING =================
+let bulkEditChanges = {};
+function renderBulkEdit(main){
+  bulkEditChanges = {};
+  main.innerHTML = `
+    <div class="topbar"><h1>Bulk edit pricing</h1><button class="secondary" onclick="nav('products')">Back to products</button></div>
+    <p class="role-note" style="margin-bottom:16px;">Edit purchase price, extra charges, and margin for many products at once. Landing &amp; selling price recalculate automatically when you save.</p>
+    <table>
+      <thead><tr><th>Product</th><th class="num">Purchase (₹)</th><th class="num">Addl %</th><th class="num">Addl ₹</th><th class="num">Margin %</th><th class="num">GST %</th><th class="num">Landing</th><th class="num">Selling</th></tr></thead>
+      <tbody id="bulkRows"></tbody>
+    </table>
+    <button class="gold" id="bulkSaveBtn" style="margin-top:18px;" onclick="saveBulkEdits()">Save all changes</button>
+  `;
+  const rows = document.getElementById('bulkRows');
+  if(state.products.length===0){ rows.innerHTML = `<tr><td colspan="8"><div class="empty">No products yet.</div></td></tr>`; return; }
+  rows.innerHTML = state.products.map(p => `
+    <tr data-id="${p.product_id}">
+      <td>${p.name} <span class="tag">${p.sku}</span></td>
+      <td><input type="number" value="${p.purchase_price}" style="width:90px;" oninput="bulkFieldChange('${p.product_id}','purchase_price',this.value)"></td>
+      <td><input type="number" value="${p.additional_charge_pct}" style="width:70px;" oninput="bulkFieldChange('${p.product_id}','additional_charge_pct',this.value)"></td>
+      <td><input type="number" value="${p.additional_charge_fixed}" style="width:70px;" oninput="bulkFieldChange('${p.product_id}','additional_charge_fixed',this.value)"></td>
+      <td><input type="number" value="${p.margin_pct}" style="width:70px;" oninput="bulkFieldChange('${p.product_id}','margin_pct',this.value)"></td>
+      <td><input type="number" value="${p.gst_rate}" style="width:60px;" oninput="bulkFieldChange('${p.product_id}','gst_rate',this.value)"></td>
+      <td class="num" id="landing_${p.product_id}">${inr(p.landing_price)}</td>
+      <td class="num" id="selling_${p.product_id}">${inr(p.selling_price)}</td>
+    </tr>`).join('');
+}
+function bulkFieldChange(productId, field, value){
+  if(!bulkEditChanges[productId]) bulkEditChanges[productId] = {};
+  bulkEditChanges[productId][field] = parseFloat(value)||0;
+  // live preview of landing/selling using current row values
+  const p = state.products.find(p=>p.product_id===productId);
+  const merged = {...p, ...bulkEditChanges[productId]};
+  const landing = (merged.purchase_price * (1+merged.additional_charge_pct/100)) + merged.additional_charge_fixed;
+  const selling = landing * (1+merged.margin_pct/100);
+  document.getElementById('landing_'+productId).textContent = inr(landing);
+  document.getElementById('selling_'+productId).textContent = inr(selling);
+}
+async function saveBulkEdits(){
+  const ids = Object.keys(bulkEditChanges);
+  if(ids.length===0){ alert('No changes to save.'); return; }
+  const btn = document.getElementById('bulkSaveBtn');
+  btn.disabled = true;
+  let done = 0;
+  for(const id of ids){
+    btn.textContent = `Saving ${done+1} of ${ids.length}…`;
+    await sb.from('products').update(bulkEditChanges[id]).eq('product_id', id);
+    done++;
+  }
+  bulkEditChanges = {};
+  await loadAll();
+  nav('bulkEdit');
+  alert(`Saved pricing for ${done} products.`);
+}
+
 // ================= CUSTOMERS =================
 function renderCustomers(main){
-  main.innerHTML = `<div class="topbar"><h1>Customers</h1><button class="gold" onclick="openCustomerModal()">+ Add customer</button></div>
+  main.innerHTML = `<div class="topbar"><h1>Customers</h1><div style="display:flex;gap:10px;"><button class="secondary" onclick="openCustomerImportModal()">Import from CSV</button><button class="gold" onclick="openCustomerModal()">+ Add customer</button></div></div>
     <table><thead><tr><th>Name</th><th>Phone</th><th>City</th><th class="num">Orders</th><th class="num">Total spend</th></tr></thead>
     <tbody id="custRows"></tbody></table>`;
   const rows = document.getElementById('custRows');
@@ -482,6 +539,77 @@ async function saveCustomer(){
   const {error} = await sb.from('customers').insert({name, phone:document.getElementById('c_phone').value, city:document.getElementById('c_city').value, address:document.getElementById('c_address').value});
   if(error){ alert(error.message); return; }
   closeModal(); await loadAll();
+}
+
+// ---------- CUSTOMER CSV IMPORT ----------
+let custImportRows = [];
+function openCustomerImportModal(){
+  openModal(`
+    <h2>Import customers</h2>
+    <p class="role-note">Works with a Shopify customer export, or any CSV with Name/Phone/Email/City/Address columns (column names are matched flexibly).</p>
+    <div class="field" style="margin-top:16px;"><input type="file" accept=".csv" onchange="handleCustCsvUpload(event)"></div>
+    <div id="custImportPreview"></div>
+  `);
+}
+function findCol(row, candidates){
+  for(const key of Object.keys(row)){
+    if(candidates.some(c => key.toLowerCase().trim() === c)) return row[key];
+  }
+  return '';
+}
+function handleCustCsvUpload(e){
+  const file = e.target.files[0];
+  if(!file) return;
+  document.getElementById('custImportPreview').innerHTML = `<div class="role-note" style="margin-top:12px;">Reading file…</div>`;
+  Papa.parse(file, {
+    header: true, skipEmptyLines: true,
+    complete: (results) => {
+      custImportRows = results.data.map(row => {
+        let name = findCol(row, ['name','customer name','full name']);
+        if(!name){
+          const first = findCol(row, ['first name']);
+          const last = findCol(row, ['last name']);
+          name = [first, last].filter(Boolean).join(' ');
+        }
+        return {
+          name: (name||'').trim(),
+          phone: findCol(row, ['phone','phone number','default address phone']).trim(),
+          email: findCol(row, ['email']).trim(),
+          city: findCol(row, ['city','default address city']).trim(),
+          address: findCol(row, ['address','address1','default address address1']).trim(),
+        };
+      }).filter(r => r.name);
+      renderCustImportPreview();
+    },
+    error: (err) => { document.getElementById('custImportPreview').innerHTML = `<div class="statusbar err" style="margin-top:12px;">Could not read file: ${err.message}</div>`; }
+  });
+}
+function renderCustImportPreview(){
+  const el = document.getElementById('custImportPreview');
+  if(custImportRows.length === 0){ el.innerHTML = `<div class="empty">No customer rows found — check the file has a Name column.</div>`; return; }
+  el.innerHTML = `
+    <div class="role-note" style="margin:14px 0;">${custImportRows.length} customers found. Existing phone numbers will be skipped to avoid duplicates.</div>
+    <table><thead><tr><th>Name</th><th>Phone</th><th>City</th></tr></thead>
+    <tbody>${custImportRows.slice(0,8).map(r=>`<tr><td>${r.name}</td><td>${r.phone||'—'}</td><td>${r.city||'—'}</td></tr>`).join('')}</tbody></table>
+    ${custImportRows.length>8 ? `<div class="role-note" style="margin-top:8px;">…and ${custImportRows.length-8} more</div>` : ''}
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px;">
+      <button class="secondary" onclick="closeModal()">Cancel</button>
+      <button class="gold" id="runCustImportBtn" onclick="runCustomerImport()">Import ${custImportRows.length} customers</button>
+    </div>`;
+}
+async function runCustomerImport(){
+  const btn = document.getElementById('runCustImportBtn');
+  btn.disabled = true;
+  let done = 0, skipped = 0;
+  for(const r of custImportRows){
+    btn.textContent = `Importing ${done+skipped+1} of ${custImportRows.length}…`;
+    if(r.phone && state.customers.some(c=>c.phone===r.phone)){ skipped++; continue; }
+    const {error} = await sb.from('customers').insert({name:r.name, phone:r.phone, email:r.email, city:r.city, address:r.address});
+    if(!error) done++; else skipped++;
+  }
+  closeModal();
+  await loadAll();
+  alert(`Imported ${done} customers${skipped>0 ? `, skipped ${skipped} (duplicates or errors)` : ''}.`);
 }
 
 // ================= TEAM =================
@@ -681,7 +809,7 @@ async function completeSale(){
 // ================= ORDERS / BILLS =================
 function renderOrders(main){
   main.innerHTML = `
-    <div class="topbar"><h1>Orders</h1><span class="role-note">All bills — view, print, send, or delete</span></div>
+    <div class="topbar"><h1>Orders</h1><div style="display:flex;align-items:center;gap:12px;"><span class="role-note">All bills — view, print, send, or delete</span><button class="secondary" onclick="openOrderImportModal()">Import from Shopify</button></div></div>
     <table>
       <thead><tr><th>Invoice</th><th>Date</th><th>Customer</th><th>Channel</th><th class="num">Amount</th><th></th></tr></thead>
       <tbody id="orderRows"></tbody>
@@ -771,6 +899,116 @@ async function deleteOrder(saleId){
   await loadAll();
   state.route = 'orders';
   render();
+}
+
+// ---------- ORDERS CSV IMPORT (Shopify order export) ----------
+let orderImportGroups = [];
+function openOrderImportModal(){
+  openModal(`
+    <h2>Import past orders from Shopify</h2>
+    <p class="role-note">Adds historical orders to your sales records for reporting. <strong>Stock is NOT changed</strong> — your current stock already reflects these past sales. GST is approximated as an even CGST/SGST split from Shopify's total tax, since Shopify doesn't export the exact breakdown. Line items whose SKU doesn't match a product here will be skipped.</p>
+    <div class="field" style="margin-top:16px;"><input type="file" accept=".csv" onchange="handleOrderCsvUpload(event)"></div>
+    <div id="orderImportPreview"></div>
+  `);
+}
+function handleOrderCsvUpload(e){
+  const file = e.target.files[0];
+  if(!file) return;
+  document.getElementById('orderImportPreview').innerHTML = `<div class="role-note" style="margin-top:12px;">Reading file…</div>`;
+  Papa.parse(file, {
+    header: true, skipEmptyLines: true,
+    complete: (results) => { orderImportGroups = buildOrderGroups(results.data); renderOrderImportPreview(); },
+    error: (err) => { document.getElementById('orderImportPreview').innerHTML = `<div class="statusbar err" style="margin-top:12px;">Could not read file: ${err.message}</div>`; }
+  });
+}
+function buildOrderGroups(csvRows){
+  const groups = {};
+  let lastOrderName = '';
+  for(const row of csvRows){
+    const orderName = (findCol(row, ['name','order','order name']) || '').trim() || lastOrderName;
+    if(!orderName) continue;
+    lastOrderName = orderName;
+    if(!groups[orderName]){
+      groups[orderName] = {
+        orderName,
+        email: findCol(row, ['email']).trim(),
+        phone: findCol(row, ['phone','billing phone','shipping phone']).trim(),
+        custName: findCol(row, ['billing name','shipping name']).trim(),
+        total: parseFloat(findCol(row, ['total'])) || 0,
+        taxes: parseFloat(findCol(row, ['taxes'])) || 0,
+        discount: parseFloat(findCol(row, ['discount amount'])) || 0,
+        createdAt: findCol(row, ['created at','paid at']) || new Date().toISOString(),
+        financialStatus: findCol(row, ['financial status']).trim(),
+        items: [],
+      };
+    }
+    const sku = findCol(row, ['lineitem sku']).trim();
+    const qty = parseInt(findCol(row, ['lineitem quantity'])) || 0;
+    const price = parseFloat(findCol(row, ['lineitem price']));
+    if(sku && qty && !isNaN(price)){
+      groups[orderName].items.push({sku, qty, price});
+    }
+  }
+  return Object.values(groups).filter(g => g.items.length > 0 && g.total > 0);
+}
+function renderOrderImportPreview(){
+  const el = document.getElementById('orderImportPreview');
+  if(orderImportGroups.length === 0){ el.innerHTML = `<div class="empty">No orders found. Make sure it's the standard Shopify order export.</div>`; return; }
+  const matchable = orderImportGroups.filter(g => g.items.every(it => state.products.some(p=>p.sku===it.sku)));
+  el.innerHTML = `
+    <div class="role-note" style="margin:14px 0;">${orderImportGroups.length} orders found, ${matchable.length} with all line items matching a product SKU in your catalog.</div>
+    <table><thead><tr><th>Order</th><th>Customer</th><th class="num">Total</th><th>Items match?</th></tr></thead>
+    <tbody>${orderImportGroups.slice(0,8).map(g=>`<tr><td>${g.orderName}</td><td>${g.custName||g.email||'—'}</td><td class="num">${inr(g.total)}</td><td>${g.items.every(it=>state.products.some(p=>p.sku===it.sku)) ? '<span style="color:var(--sage)">yes</span>' : '<span class="badge-low">some missing</span>'}</td></tr>`).join('')}</tbody></table>
+    ${orderImportGroups.length>8 ? `<div class="role-note" style="margin-top:8px;">…and ${orderImportGroups.length-8} more</div>` : ''}
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px;">
+      <button class="secondary" onclick="closeModal()">Cancel</button>
+      <button class="gold" id="runOrderImportBtn" onclick="runOrderImport()">Import ${orderImportGroups.length} orders</button>
+    </div>`;
+}
+async function runOrderImport(){
+  const btn = document.getElementById('runOrderImportBtn');
+  btn.disabled = true;
+  let done = 0, skippedItems = 0;
+  for(const g of orderImportGroups){
+    btn.textContent = `Importing ${done+1} of ${orderImportGroups.length}…`;
+    let customerId = null;
+    if(g.custName || g.email){
+      let existing = g.email ? state.customers.find(c=>c.email===g.email) : null;
+      if(!existing && g.phone) existing = state.customers.find(c=>c.phone===g.phone);
+      if(existing) customerId = existing.customer_id;
+      else{
+        const {data:newCust} = await sb.from('customers').insert({name:g.custName||g.email, phone:g.phone, email:g.email}).select().single();
+        if(newCust){ customerId = newCust.customer_id; state.customers.push(newCust); }
+      }
+    }
+    const finalAmount = g.total;
+    const taxable = finalAmount - g.taxes;
+    const {data: sale, error: saleErr} = await sb.from('sales').insert({
+      invoice_number: g.orderName,
+      customer_id: customerId,
+      channel: 'online',
+      sale_date: g.createdAt,
+      subtotal_before_discount: finalAmount + g.discount,
+      discount_value: g.discount,
+      final_amount: finalAmount,
+      taxable_value: taxable,
+      cgst_amount: g.taxes/2, sgst_amount: g.taxes/2, igst_amount: 0,
+      state_type: 'intra-state',
+      payment_method: g.financialStatus || 'Online',
+    }).select().single();
+    if(saleErr) continue;
+    const items = [];
+    for(const it of g.items){
+      const p = state.products.find(p=>p.sku===it.sku);
+      if(!p){ skippedItems++; continue; }
+      items.push({sale_id: sale.sale_id, product_id: p.product_id, quantity: it.qty, unit_price: it.price, landing_price_snapshot: p.landing_price, line_total: it.price*it.qty});
+    }
+    if(items.length>0) await sb.from('sale_items').insert(items);
+    done++;
+  }
+  closeModal();
+  await loadAll();
+  alert(`Imported ${done} orders.${skippedItems>0 ? ` ${skippedItems} line items were skipped (no matching SKU).` : ''} Stock was not changed.`);
 }
 
 // ================= DASHBOARD =================
