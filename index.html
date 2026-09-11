@@ -269,10 +269,23 @@ function openProductModal(id){
 function handleImageUpload(e){
   const file = e.target.files[0];
   if(!file) return;
+  const preview = document.getElementById('imgPreview');
+  preview.innerHTML = `<span class="role-note">Compressing photo…</span>`;
+  const img = new Image();
   const reader = new FileReader();
-  reader.onload = (ev) => {
-    window._pendingImage = ev.target.result;
-    document.getElementById('imgPreview').innerHTML = `<img src="${ev.target.result}" style="width:70px;height:70px;object-fit:cover;">`;
+  reader.onload = (ev) => { img.src = ev.target.result; };
+  img.onload = () => {
+    const MAX_DIM = 900; // long edge cap, keeps files small without visible quality loss for product photos
+    let {width, height} = img;
+    if(width > height && width > MAX_DIM){ height = Math.round(height * MAX_DIM/width); width = MAX_DIM; }
+    else if(height > MAX_DIM){ width = Math.round(width * MAX_DIM/height); height = MAX_DIM; }
+    const canvas = document.createElement('canvas');
+    canvas.width = width; canvas.height = height;
+    canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+    const webpDataUrl = canvas.toDataURL('image/webp', 0.82);
+    window._pendingImage = webpDataUrl;
+    const kb = Math.round((webpDataUrl.length * 0.75) / 1024);
+    preview.innerHTML = `<img src="${webpDataUrl}" style="width:70px;height:70px;object-fit:cover;"><div class="role-note">${width}×${height}px, ~${kb}KB (WebP)</div>`;
   };
   reader.readAsDataURL(file);
 }
