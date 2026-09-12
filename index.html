@@ -108,21 +108,23 @@ const NAV = [
   {id:'products', label:'Products'},
   {id:'customers', label:'Customers'},
   {id:'team', label:'Team'},
+  {id:'company', label:'Company'},
 ];
 
-let state = { categories:[], products:[], customers:[], sales:[], saleItems:[], team:[], route:'dashboard', loaded:false, connError:null };
+let state = { categories:[], products:[], customers:[], sales:[], saleItems:[], team:[], company:null, route:'dashboard', loaded:false, connError:null };
 const inr = (n) => '₹' + (Math.round((n||0)*100)/100).toLocaleString('en-IN',{minimumFractionDigits:0,maximumFractionDigits:2});
 
 // ====== DATA LOAD ======
 async function loadAll(){
   try{
-    const [cats, prods, custs, sales, saleItems, team] = await Promise.all([
+    const [cats, prods, custs, sales, saleItems, team, company] = await Promise.all([
       sb.from('categories').select('*').order('name'),
       sb.from('products').select('*, product_images(image_url, is_primary)').order('created_at', {ascending:false}),
       sb.from('customers').select('*'),
       sb.from('sales').select('*').order('sale_date', {ascending:false}),
       sb.from('sale_items').select('*'),
       sb.from('team_members').select('*'),
+      sb.from('company_settings').select('*').eq('id', 1).single(),
     ]);
     for(const r of [cats, prods, custs, sales, saleItems, team]){
       if(r.error) throw r.error;
@@ -133,6 +135,7 @@ async function loadAll(){
     state.sales = sales.data;
     state.saleItems = saleItems.data;
     state.team = team.data;
+    state.company = company.data || {company_name:'Swasole', address:'', phone:'', email:'', gstin:''};
     state.connError = null;
   }catch(e){
     console.error(e);
@@ -162,6 +165,7 @@ function render(){
   else if(state.route === 'products') renderProducts(main);
   else if(state.route === 'customers') renderCustomers(main);
   else if(state.route === 'team') renderTeam(main);
+  else if(state.route === 'company') renderCompany(main);
 }
 function renderSidebar(){
   document.getElementById('sidebar').innerHTML = `<div class="brand">Swasole</div>` +
@@ -668,6 +672,38 @@ async function toggleTeamStatus(id, currentStatus){
   await loadAll();
 }
 
+// ================= COMPANY PROFILE =================
+function renderCompany(main){
+  const c = state.company || {};
+  main.innerHTML = `
+    <div class="topbar"><h1>Company profile</h1><span class="role-note">Shown on every printed invoice</span></div>
+    <div class="field"><label>Company name</label><input id="co_name" value="${c.company_name||''}"></div>
+    <div class="field"><label>Address</label><input id="co_address" value="${c.address||''}"></div>
+    <div class="grid2">
+      <div class="field"><label>Phone</label><input id="co_phone" value="${c.phone||''}"></div>
+      <div class="field"><label>Email</label><input id="co_email" value="${c.email||''}"></div>
+    </div>
+    <div class="field"><label>GSTIN</label><input id="co_gstin" value="${c.gstin||''}" placeholder="e.g. 09ABCDE1234F1Z5"></div>
+    <button class="gold" id="saveCoBtn" onclick="saveCompany()">Save company details</button>
+  `;
+}
+async function saveCompany(){
+  const btn = document.getElementById('saveCoBtn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const data = {
+    company_name: document.getElementById('co_name').value,
+    address: document.getElementById('co_address').value,
+    phone: document.getElementById('co_phone').value,
+    email: document.getElementById('co_email').value,
+    gstin: document.getElementById('co_gstin').value,
+  };
+  const {error} = await sb.from('company_settings').update(data).eq('id', 1);
+  if(error){ alert('Could not save: '+error.message); btn.disabled=false; btn.textContent='Save company details'; return; }
+  await loadAll();
+  nav('company');
+  alert('Company details saved.');
+}
+
 // ================= POS =================
 let cart = [];
 function renderPOS(main){
@@ -804,7 +840,7 @@ async function completeSale(){
 
   const items = cart.map(l=>{
     const p = state.products.find(p=>p.product_id===l.productId);
-    return {sale_id: sale.sale_id, product_id: p.product_id, quantity: l.qty, unit_price: p.selling_price, landing_price_snapshot: p.landing_price, line_total: p.selling_price*l.qty};
+    return {sale_id: sale.sale_id, product_id: p.product_id, item_name: p.name, quantity: l.qty, unit_price: p.selling_price, landing_price_snapshot: p.landing_price, line_total: p.selling_price*l.qty};
   });
   const {error: itemsErr} = await sb.from('sale_items').insert(items);
   if(itemsErr){ alert('Sale saved but items failed: '+itemsErr.message); }
@@ -868,16 +904,27 @@ function openOrderDetail(saleId){
   const s = state.sales.find(s=>s.sale_id===saleId);
   const items = state.saleItems.filter(i=>i.sale_id===saleId);
   const cust = state.customers.find(c=>c.customer_id===s.customer_id);
-  const dateStr = new Date(s.sale_date).toLocaleString('en-IN', {dateStyle:'medium', timeStyle:'short'});
+  const co = state.company || {};
+  const dateStr = new Date(s.sale_date).toLocaleDateString('en-IN', {day:'2-digit', month:'short', year:'numeric'});
   openModal(`
     <div id="printInvoice">
-      <h2>Swasole</h2>
-      <p class="role-note">Invoice ${s.invoice_number} — ${dateStr}</p>
+      <div style="text-align:center;margin-bottom:14px;">
+        <h1 style="font-size:26px;">${co.company_name || 'Swasole'}</h1>
+        ${co.address ? `<p style="font-size:12px;color:var(--ink-soft);margin:4px 0 0;">${co.address}</p>` : ''}
+        <p style="font-size:12px;color:var(--ink-soft);margin:2px 0 0;">${[co.phone, co.email].filter(Boolean).join(' · ')}</p>
+        ${co.gstin ? `<p style="font-size:12px;color:var(--ink-soft);margin:2px 0 0;">GSTIN: ${co.gstin}</p>` : ''}
+      </div>
       <div class="hairline"></div>
-      <p style="font-size:13px;"><strong>${cust ? cust.name : 'Walk-in customer'}</strong>${cust&&cust.phone?`<br>${cust.phone}`:''}${cust&&cust.address?`<br>${cust.address}`:''}</p>
-      <table style="margin-top:12px;">
+      <div style="display:flex;justify-content:space-between;font-size:12px;margin:10px 0;">
+        <div><strong>TAX INVOICE</strong></div>
+        <div>Invoice ${s.invoice_number}<br>${dateStr}</div>
+      </div>
+      <div class="hairline"></div>
+      <p style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.04em;margin:10px 0 4px;">Bill to</p>
+      <p style="font-size:13px;margin:0;"><strong>${cust ? cust.name : 'Walk-in customer'}</strong>${cust&&cust.phone?`<br>${cust.phone}`:''}${cust&&cust.address?`<br>${cust.address}`:''}</p>
+      <table style="margin-top:14px;">
         <thead><tr><th>Item</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Total</th></tr></thead>
-        <tbody>${items.map(i=>`<tr><td>${i.product_id ? (state.products.find(p=>p.product_id===i.product_id)?.name || 'Product') : 'Product'}</td><td class="num">${i.quantity}</td><td class="num">${inr(i.unit_price)}</td><td class="num">${inr(i.line_total)}</td></tr>`).join('')}</tbody>
+        <tbody>${items.map(i=>`<tr><td>${(i.product_id && state.products.find(p=>p.product_id===i.product_id)?.name) || i.item_name || 'Product'}</td><td class="num">${i.quantity}</td><td class="num">${inr(i.unit_price)}</td><td class="num">${inr(i.line_total)}</td></tr>`).join('')}</tbody>
       </table>
       <div class="hairline"></div>
       <div class="cart-line"><span>Subtotal</span><span class="num">${inr(s.subtotal_before_discount)}</span></div>
@@ -889,6 +936,7 @@ function openOrderDetail(saleId){
       <div class="cart-line"><span>IGST</span><span class="num">${inr(s.igst_amount)}</span></div>`}
       <div class="cart-line" style="font-weight:700;font-size:15px;"><span>Total paid</span><span class="num">${inr(s.final_amount)}</span></div>
       <p class="role-note" style="margin-top:6px;">Payment: ${s.payment_method || '—'}</p>
+      <p style="text-align:center;font-size:12px;color:var(--ink-soft);margin-top:24px;">Thank you for shopping with ${co.company_name || 'Swasole'}!</p>
     </div>
     <div class="hairline no-print"></div>
     <div class="no-print field">
@@ -984,11 +1032,14 @@ function buildOrderGroups(csvRows){
     if(!orderName) continue;
     lastOrderName = orderName;
     if(!groups[orderName]){
+      const addr1 = findCol(row, ['billing address1','shipping address1']).trim();
+      const city = findCol(row, ['billing city','shipping city']).trim();
       groups[orderName] = {
         orderName,
         email: findCol(row, ['email']).trim(),
         phone: findCol(row, ['phone','billing phone','shipping phone']).trim(),
         custName: findCol(row, ['billing name','shipping name']).trim(),
+        address: [addr1, city].filter(Boolean).join(', '),
         total: parseFloat(findCol(row, ['total'])) || 0,
         taxes: parseFloat(findCol(row, ['taxes'])) || 0,
         discount: parseFloat(findCol(row, ['discount amount'])) || 0,
@@ -998,22 +1049,34 @@ function buildOrderGroups(csvRows){
       };
     }
     const sku = findCol(row, ['lineitem sku']).trim();
+    const name = findCol(row, ['lineitem name']).trim();
     const qty = parseInt(findCol(row, ['lineitem quantity'])) || 0;
     const price = parseFloat(findCol(row, ['lineitem price']));
-    if(sku && qty && !isNaN(price)){
-      groups[orderName].items.push({sku, qty, price});
+    if((sku || name) && qty && !isNaN(price)){
+      groups[orderName].items.push({sku, name, qty, price});
     }
   }
   return Object.values(groups).filter(g => g.items.length > 0 && g.total > 0);
 }
+function matchProductForItem(it){
+  if(it.sku){
+    const bySku = state.products.find(p => p.sku.trim().toLowerCase() === it.sku.trim().toLowerCase());
+    if(bySku) return bySku;
+  }
+  if(it.name){
+    const byName = state.products.find(p => p.name.trim().toLowerCase() === it.name.trim().toLowerCase());
+    if(byName) return byName;
+  }
+  return null;
+}
 function renderOrderImportPreview(){
   const el = document.getElementById('orderImportPreview');
   if(orderImportGroups.length === 0){ el.innerHTML = `<div class="empty">No orders found. Make sure it's the standard Shopify order export.</div>`; return; }
-  const matchable = orderImportGroups.filter(g => g.items.every(it => state.products.some(p=>p.sku===it.sku)));
+  const matchable = orderImportGroups.filter(g => g.items.every(it => matchProductForItem(it)));
   el.innerHTML = `
-    <div class="role-note" style="margin:14px 0;">${orderImportGroups.length} orders found, ${matchable.length} with all line items matching a product SKU in your catalog.</div>
+    <div class="role-note" style="margin:14px 0;">${orderImportGroups.length} orders found, ${matchable.length} with every item matched to your catalog (by SKU or name). Unmatched items still get imported with their name and price — just without a catalog link (won't affect profit KPIs until linked).</div>
     <table><thead><tr><th>Order</th><th>Customer</th><th class="num">Total</th><th>Items match?</th></tr></thead>
-    <tbody>${orderImportGroups.slice(0,8).map(g=>`<tr><td>${g.orderName}</td><td>${g.custName||g.email||'—'}</td><td class="num">${inr(g.total)}</td><td>${g.items.every(it=>state.products.some(p=>p.sku===it.sku)) ? '<span style="color:var(--sage)">yes</span>' : '<span class="badge-low">some missing</span>'}</td></tr>`).join('')}</tbody></table>
+    <tbody>${orderImportGroups.slice(0,8).map(g=>`<tr><td>${g.orderName}</td><td>${g.custName||g.email||'—'}</td><td class="num">${inr(g.total)}</td><td>${g.items.every(it=>matchProductForItem(it)) ? '<span style="color:var(--sage)">yes</span>' : '<span class="badge-low">some unmatched</span>'}</td></tr>`).join('')}</tbody></table>
     ${orderImportGroups.length>8 ? `<div class="role-note" style="margin-top:8px;">…and ${orderImportGroups.length-8} more</div>` : ''}
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px;">
       <button class="secondary" onclick="closeModal()">Cancel</button>
@@ -1023,16 +1086,21 @@ function renderOrderImportPreview(){
 async function runOrderImport(){
   const btn = document.getElementById('runOrderImportBtn');
   btn.disabled = true;
-  let done = 0, skippedItems = 0;
+  let done = 0, unmatchedItems = 0;
   for(const g of orderImportGroups){
     btn.textContent = `Importing ${done+1} of ${orderImportGroups.length}…`;
     let customerId = null;
     if(g.custName || g.email){
       let existing = g.email ? state.customers.find(c=>c.email===g.email) : null;
       if(!existing && g.phone) existing = state.customers.find(c=>c.phone===g.phone);
-      if(existing) customerId = existing.customer_id;
-      else{
-        const {data:newCust} = await sb.from('customers').insert({name:g.custName||g.email, phone:g.phone, email:g.email}).select().single();
+      if(existing){
+        customerId = existing.customer_id;
+        const patch = {};
+        if(!existing.phone && g.phone) patch.phone = g.phone;
+        if(!existing.address && g.address) patch.address = g.address;
+        if(Object.keys(patch).length) await sb.from('customers').update(patch).eq('customer_id', customerId);
+      }else{
+        const {data:newCust} = await sb.from('customers').insert({name:g.custName||g.email, phone:g.phone, email:g.email, address:g.address}).select().single();
         if(newCust){ customerId = newCust.customer_id; state.customers.push(newCust); }
       }
     }
@@ -1052,18 +1120,25 @@ async function runOrderImport(){
       payment_method: g.financialStatus || 'Online',
     }).select().single();
     if(saleErr) continue;
-    const items = [];
-    for(const it of g.items){
-      const p = state.products.find(p=>p.sku===it.sku);
-      if(!p){ skippedItems++; continue; }
-      items.push({sale_id: sale.sale_id, product_id: p.product_id, quantity: it.qty, unit_price: it.price, landing_price_snapshot: p.landing_price, line_total: it.price*it.qty});
-    }
+    const items = g.items.map(it => {
+      const p = matchProductForItem(it);
+      if(!p) unmatchedItems++;
+      return {
+        sale_id: sale.sale_id,
+        product_id: p ? p.product_id : null,
+        item_name: it.name || (p ? p.name : 'Product'),
+        quantity: it.qty,
+        unit_price: it.price,
+        landing_price_snapshot: p ? p.landing_price : it.price,
+        line_total: it.price*it.qty,
+      };
+    });
     if(items.length>0) await sb.from('sale_items').insert(items);
     done++;
   }
   closeModal();
   await loadAll();
-  alert(`Imported ${done} orders.${skippedItems>0 ? ` ${skippedItems} line items were skipped (no matching SKU).` : ''} Stock was not changed.`);
+  alert(`Imported ${done} orders.${unmatchedItems>0 ? ` ${unmatchedItems} line items couldn't be matched to a catalog product but were still recorded with their name.` : ''} Stock was not changed.`);
 }
 
 // ---------- ADD PAST OFFLINE SALE (no stock impact) ----------
@@ -1177,7 +1252,7 @@ async function saveHistoricalSale(){
 
   const items = histCart.map(l=>{
     const p = state.products.find(p=>p.product_id===l.productId);
-    return {sale_id: sale.sale_id, product_id: p.product_id, quantity: l.qty, unit_price: l.price, landing_price_snapshot: p.landing_price, line_total: l.price*l.qty};
+    return {sale_id: sale.sale_id, product_id: p.product_id, item_name: p.name, quantity: l.qty, unit_price: l.price, landing_price_snapshot: p.landing_price, line_total: l.price*l.qty};
   });
   await sb.from('sale_items').insert(items);
   // deliberately no inventory_transactions or stock_qty change — this sale already happened before tracking started
@@ -1266,7 +1341,7 @@ function renderDashBody(){
   const repeatRate = custIds.length>0 ? (repeatCustomers.length/custIds.length*100) : 0;
 
   const prodRev = {};
-  allItems.forEach(it=>{ const p = state.products.find(p=>p.product_id===it.product_id); const name = p?p.name:'Deleted product'; prodRev[name] = (prodRev[name]||0) + Number(it.line_total); });
+  allItems.forEach(it=>{ const p = state.products.find(p=>p.product_id===it.product_id); const name = p ? p.name : (it.item_name || 'Unlinked product'); prodRev[name] = (prodRev[name]||0) + Number(it.line_total); });
   const topProducts = Object.entries(prodRev).sort((a,b)=>b[1]-a[1]).slice(0,6);
   const maxProdRev = Math.max(1, ...topProducts.map(p=>p[1]));
 
