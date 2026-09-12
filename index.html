@@ -49,10 +49,14 @@ tr:hover td{background:#FCFAF6;}
 .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);margin-bottom:28px;}
 .kpi{background:var(--surface);padding:18px 20px;}
 .kpi .label{font-size:11px;color:var(--ink-soft);letter-spacing:0.03em;text-transform:uppercase;margin-bottom:6px;}
-.kpi .value{font-family:'Cormorant Garamond',serif;font-size:28px;font-weight:600;}
+.kpi .value{font-family:'Inter',sans-serif;font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-0.01em;}
 .section-title{font-size:12px;letter-spacing:0.06em;color:var(--ink-soft);text-transform:uppercase;margin:0 0 12px;border-bottom:1px solid var(--line);padding-bottom:8px;}
 .filters{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:22px;align-items:flex-end;}
 .filters .field{margin-bottom:0;min-width:140px;}
+.bar-chart{display:flex;align-items:flex-end;gap:6px;height:190px;padding:10px 4px 0;overflow-x:auto;}
+.bar-chart .col{flex:1;min-width:28px;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;}
+.bar-chart .bar{width:100%;max-width:34px;background:var(--gold);min-height:2px;}
+.bar-chart .barlabel{font-size:10px;color:var(--ink-soft);text-align:center;line-height:1.3;margin-top:6px;white-space:nowrap;}
 .hbar-row{display:flex;align-items:center;gap:10px;margin-bottom:9px;}
 .hbar-row .name{width:150px;font-size:12.5px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .hbar-track{flex:1;background:var(--line);height:14px;position:relative;}
@@ -105,6 +109,7 @@ const NAV = [
   {id:'dashboard', label:'Dashboard'},
   {id:'pos', label:'Billing'},
   {id:'orders', label:'Orders'},
+  {id:'reports', label:'Reports'},
   {id:'products', label:'Products'},
   {id:'customers', label:'Customers'},
   {id:'team', label:'Team'},
@@ -166,6 +171,7 @@ function render(){
   else if(state.route === 'customers') renderCustomers(main);
   else if(state.route === 'team') renderTeam(main);
   else if(state.route === 'company') renderCompany(main);
+  else if(state.route === 'reports') renderReports(main);
 }
 function renderSidebar(){
   document.getElementById('sidebar').innerHTML = `<div class="brand">Swasole</div>` +
@@ -1320,6 +1326,126 @@ async function saveHistoricalSale(){
   alert('Past sale recorded: ' + sale.invoice_number);
 }
 
+// ================= REPORTS =================
+let reportMode = 'monthly';
+let reportMonth = new Date().toISOString().slice(0,7); // YYYY-MM
+let reportYear = new Date().getFullYear();
+function renderReports(main){
+  main.innerHTML = `
+    <div class="topbar"><h1>Reports</h1><span class="role-note">Monthly or yearly summaries, downloadable for your records or GST filing</span></div>
+    <div class="filters">
+      <div class="field"><label>Report type</label>
+        <select id="repMode" onchange="reportMode=this.value; renderReports(document.getElementById('main'))">
+          <option value="monthly" ${reportMode==='monthly'?'selected':''}>Monthly</option>
+          <option value="yearly" ${reportMode==='yearly'?'selected':''}>Yearly</option>
+        </select>
+      </div>
+      ${reportMode==='monthly' ? `
+      <div class="field"><label>Month</label><input type="month" id="repMonth" value="${reportMonth}" onchange="reportMonth=this.value; renderReportBody()"></div>
+      ` : `
+      <div class="field"><label>Year</label><input type="number" id="repYear" value="${reportYear}" onchange="reportYear=parseInt(this.value); renderReportBody()"></div>
+      `}
+    </div>
+    <div id="reportBody"></div>
+  `;
+  renderReportBody();
+}
+function reportPeriodSales(){
+  return state.sales.filter(s=>{
+    const d = new Date(s.sale_date);
+    if(reportMode==='monthly') return d.toISOString().slice(0,7) === reportMonth;
+    return d.getFullYear() === reportYear;
+  });
+}
+function renderReportBody(){
+  const el = document.getElementById('reportBody');
+  const sales = reportPeriodSales();
+  const periodLabel = reportMode==='monthly'
+    ? new Date(reportMonth+'-01').toLocaleDateString('en-IN', {month:'long', year:'numeric'})
+    : String(reportYear);
+  if(sales.length===0){
+    el.innerHTML = `<div class="empty">No bills recorded for ${periodLabel}.</div>`;
+    return;
+  }
+  const allItems = sales.flatMap(s=>state.saleItems.filter(i=>i.sale_id===s.sale_id));
+  const revenue = sales.reduce((a,s)=>a+Number(s.final_amount),0);
+  const orders = sales.length;
+  const units = allItems.reduce((a,i)=>a+i.quantity,0);
+  const profit = allItems.reduce((a,i)=>a+(Number(i.unit_price)-Number(i.landing_price_snapshot))*i.quantity,0);
+  const margin = revenue>0 ? (profit/revenue*100) : 0;
+  const gstCollected = sales.reduce((a,s)=>a+Number(s.cgst_amount)+Number(s.sgst_amount)+Number(s.igst_amount),0);
+  const discountTotal = sales.reduce((a,s)=>a+Number(s.discount_value),0);
+  const storeRev = sales.filter(s=>s.channel==='store').reduce((a,s)=>a+Number(s.final_amount),0);
+  const onlineRev = sales.filter(s=>s.channel==='online').reduce((a,s)=>a+Number(s.final_amount),0);
+
+  const prodRev = {};
+  allItems.forEach(it=>{ const p = state.products.find(p=>p.product_id===it.product_id); const name = p ? p.name : (it.item_name || 'Unlinked product'); prodRev[name] = (prodRev[name]||0) + Number(it.line_total); });
+  const topProducts = Object.entries(prodRev).sort((a,b)=>b[1]-a[1]).slice(0,8);
+
+  el.innerHTML = `
+    <div id="printInvoice">
+      <h2>${state.company?.company_name || 'Swasole'} — ${periodLabel} report</h2>
+      <p class="role-note">${state.company?.gstin ? 'GSTIN: '+state.company.gstin : ''}</p>
+      <div class="hairline"></div>
+      <div class="kpi-grid">
+        <div class="kpi"><div class="label">Revenue</div><div class="value">${inr(revenue)}</div></div>
+        <div class="kpi"><div class="label">Orders</div><div class="value">${orders}</div></div>
+        <div class="kpi"><div class="label">Units sold</div><div class="value">${units}</div></div>
+        <div class="kpi"><div class="label">Gross profit</div><div class="value">${inr(profit)}</div></div>
+        <div class="kpi"><div class="label">Gross margin</div><div class="value">${margin.toFixed(1)}%</div></div>
+        <div class="kpi"><div class="label">GST collected</div><div class="value">${inr(gstCollected)}</div></div>
+        <div class="kpi"><div class="label">Discount given</div><div class="value">${inr(discountTotal)}</div></div>
+        <div class="kpi"><div class="label">Store vs online</div><div class="value" style="font-size:16px;">${inr(storeRev)} / ${inr(onlineRev)}</div></div>
+      </div>
+      <div class="section-title">Top products this period</div>
+      <table style="margin-bottom:20px;">
+        <thead><tr><th>Product</th><th class="num">Revenue</th></tr></thead>
+        <tbody>${topProducts.map(([name,rev])=>`<tr><td>${name}</td><td class="num">${inr(rev)}</td></tr>`).join('')}</tbody>
+      </table>
+      <div class="section-title">All bills this period (${orders})</div>
+      <table>
+        <thead><tr><th>Bill #</th><th>Date</th><th class="num">Amount</th><th class="num">GST</th></tr></thead>
+        <tbody>${[...sales].sort((a,b)=>new Date(a.sale_date)-new Date(b.sale_date)).map(s=>`
+          <tr><td>${s.invoice_number}</td><td>${new Date(s.sale_date).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'})}</td><td class="num">${inr(s.final_amount)}</td><td class="num">${inr(Number(s.cgst_amount)+Number(s.sgst_amount)+Number(s.igst_amount))}</td></tr>`).join('')}</tbody>
+      </table>
+    </div>
+    <div class="no-print" style="display:flex;gap:8px;margin-top:20px;flex-wrap:wrap;">
+      <button class="secondary" onclick="printInvoice()">Print / Save PDF</button>
+      <button class="gold" onclick="downloadReportCsv()">Download CSV (sales register)</button>
+    </div>
+  `;
+}
+function downloadReportCsv(){
+  const sales = [...reportPeriodSales()].sort((a,b)=>new Date(a.sale_date)-new Date(b.sale_date));
+  const periodLabel = reportMode==='monthly' ? reportMonth : String(reportYear);
+  const header = ['Bill Number','Date','Customer','Channel','Payment Method','Subtotal','Discount','Taxable Value','CGST','SGST','IGST','Total'];
+  const rows = sales.map(s=>{
+    const cust = state.customers.find(c=>c.customer_id===s.customer_id);
+    return [
+      s.invoice_number,
+      new Date(s.sale_date).toLocaleDateString('en-IN'),
+      cust ? cust.name : 'Walk-in',
+      s.channel,
+      s.payment_method || '',
+      s.subtotal_before_discount,
+      s.discount_value,
+      s.taxable_value,
+      s.cgst_amount,
+      s.sgst_amount,
+      s.igst_amount,
+      s.final_amount,
+    ].map(v => `"${String(v).replace(/"/g,'""')}"`).join(',');
+  });
+  const csv = [header.join(','), ...rows].join('\n');
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `swasole-sales-register-${periodLabel}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 // ================= DASHBOARD =================
 let dashFilters = {range:'30', channel:'all', categoryId:'all'};
 function renderDashboard(main){
@@ -1408,6 +1534,39 @@ function renderDashBody(){
   const catEntries = Object.entries(catRev);
   const maxCatRev = Math.max(1, ...catEntries.map(c=>c[1]));
 
+  // revenue trend by day (bucketed to at most ~14 bars for readability)
+  const dayRev = {};
+  sales.forEach(s=>{
+    const d = new Date(s.sale_date).toLocaleDateString('en-IN', {day:'2-digit', month:'short'});
+    dayRev[d] = (dayRev[d]||0) + Number(s.final_amount);
+  });
+  let trendEntries = Object.entries(dayRev).sort((a,b)=> new Date(a[0]+' 2025') - new Date(b[0]+' 2025'));
+  if(trendEntries.length > 14){
+    // collapse into ~14 buckets by grouping consecutive days
+    const bucketSize = Math.ceil(trendEntries.length/14);
+    const bucketed = [];
+    for(let i=0;i<trendEntries.length;i+=bucketSize){
+      const chunk = trendEntries.slice(i, i+bucketSize);
+      const label = chunk.length>1 ? `${chunk[0][0]}–${chunk[chunk.length-1][0]}` : chunk[0][0];
+      bucketed.push([label, chunk.reduce((a,c)=>a+c[1],0)]);
+    }
+    trendEntries = bucketed;
+  }
+  const maxTrend = Math.max(1, ...trendEntries.map(t=>t[1]));
+
+  // stock by category — current snapshot, not filtered by date/channel
+  const stockByCat = {};
+  const valueByCat = {};
+  state.products.forEach(p=>{
+    const cname = catName(p.category_id);
+    stockByCat[cname] = (stockByCat[cname]||0) + p.stock_qty;
+    valueByCat[cname] = (valueByCat[cname]||0) + (p.landing_price * p.stock_qty);
+  });
+  const stockEntries = Object.entries(stockByCat).sort((a,b)=>b[1]-a[1]);
+  const maxStock = Math.max(1, ...stockEntries.map(s=>s[1]));
+  const valueEntries = Object.entries(valueByCat).sort((a,b)=>b[1]-a[1]);
+  const maxValue = Math.max(1, ...valueEntries.map(v=>v[1]));
+
   el.innerHTML = `
     <div class="section-title">Sales &amp; revenue</div>
     <div class="kpi-grid">
@@ -1417,6 +1576,16 @@ function renderDashBody(){
       <div class="kpi"><div class="label">Avg order value</div><div class="value">${inr(aov)}</div></div>
       <div class="kpi"><div class="label">Store vs online</div><div class="value" style="font-size:16px;">${inr(storeRev)} / ${inr(onlineRev)}</div></div>
     </div>
+
+    <div class="section-title">Revenue trend</div>
+    <div class="bar-chart" style="margin-bottom:28px;">
+      ${trendEntries.length===0 ? '<div class="empty">No data for this filter.</div>' : trendEntries.map(([label,rev])=>`
+        <div class="col">
+          <div class="bar" style="height:${Math.max(2,(rev/maxTrend*140))}px;" title="${inr(rev)}"></div>
+          <div class="barlabel">${label}<br>${inr(rev)}</div>
+        </div>`).join('')}
+    </div>
+
     <div class="section-title">Profitability</div>
     <div class="kpi-grid">
       <div class="kpi"><div class="label">Gross profit</div><div class="value">${inr(profit)}</div></div>
@@ -1428,6 +1597,20 @@ function renderDashBody(){
       <div class="kpi"><div class="label">Inventory value</div><div class="value">${inr(inventoryValue)}</div></div>
       <div class="kpi"><div class="label">Low stock</div><div class="value ${lowStock.length>0?'badge-low':''}">${lowStock.length}</div></div>
       <div class="kpi"><div class="label">Out of stock</div><div class="value ${outOfStock.length>0?'badge-low':''}">${outOfStock.length}</div></div>
+    </div>
+    <div class="grid2" style="margin-bottom:28px;">
+      <div><div class="section-title">Stock on hand by category (units)</div>
+        ${stockEntries.length===0 ? '<div class="empty">No products yet.</div>' : stockEntries.map(([name,qty])=>`
+          <div class="hbar-row"><div class="name">${name}</div>
+          <div class="hbar-track"><div class="hbar-fill" style="width:${(qty/maxStock*100)}%;"></div></div>
+          <div class="hbar-val">${qty} units</div></div>`).join('')}
+      </div>
+      <div><div class="section-title">Stock value by category (₹)</div>
+        ${valueEntries.length===0 ? '<div class="empty">No products yet.</div>' : valueEntries.map(([name,val])=>`
+          <div class="hbar-row"><div class="name">${name}</div>
+          <div class="hbar-track"><div class="hbar-fill" style="width:${(val/maxValue*100)}%;"></div></div>
+          <div class="hbar-val">${inr(val)}</div></div>`).join('')}
+      </div>
     </div>
     <div class="section-title">Tax</div>
     <div class="kpi-grid"><div class="kpi"><div class="label">GST collected</div><div class="value">${inr(gstCollected)}</div></div></div>
