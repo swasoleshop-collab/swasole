@@ -469,9 +469,9 @@ function renderBulkEdit(main){
   bulkEditChanges = {};
   main.innerHTML = `
     <div class="topbar"><h1>Bulk edit pricing</h1><button class="secondary" onclick="nav('products')">Back to products</button></div>
-    <p class="role-note" style="margin-bottom:16px;">Enter the real purchase price for each product. <strong>Selling price stays exactly as it is</strong> unless you deliberately change it — margin % is calculated for you automatically, purely for your profit reports.</p>
+    <p class="role-note" style="margin-bottom:16px;">Enter what the item actually cost you to have ready for sale (your landing price) in the first column. <strong>Selling price stays exactly as it is</strong> unless you deliberately change it — margin % is calculated for you automatically, purely for your profit reports.</p>
     <table>
-      <thead><tr><th>Product</th><th class="num">Purchase (₹)</th><th class="num">Selling price (₹)</th><th class="num">Margin % (auto)</th><th class="num">GST %</th></tr></thead>
+      <thead><tr><th>Product</th><th class="num">Purchase / Landing (₹)</th><th class="num">Selling price (₹)</th><th class="num">Margin % (auto)</th><th class="num">GST %</th></tr></thead>
       <tbody id="bulkRows"></tbody>
     </table>
     <button class="gold" id="bulkSaveBtn" style="margin-top:18px;" onclick="saveBulkEdits()">Save all changes</button>
