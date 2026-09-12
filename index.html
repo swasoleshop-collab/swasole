@@ -468,7 +468,7 @@ let bulkEditChanges = {};
 function renderBulkEdit(main){
   bulkEditChanges = {};
   main.innerHTML = `
-    <div class="topbar"><h1>Bulk edit pricing</h1><button class="secondary" onclick="nav('products')">Back to products</button></div>
+    <div class="topbar"><h1>Bulk edit pricing</h1><div style="display:flex;gap:10px;"><button class="secondary" onclick="openAutoEstimateModal()">Auto-estimate purchase price</button><button class="secondary" onclick="nav('products')">Back to products</button></div></div>
     <p class="role-note" style="margin-bottom:16px;">Enter what the item actually cost you to have ready for sale (your landing price) in the first column. <strong>Selling price stays exactly as it is</strong> unless you deliberately change it — margin % is calculated for you automatically, purely for your profit reports.</p>
     <table>
       <thead><tr><th>Product</th><th class="num">Purchase / Landing (₹)</th><th class="num">Selling price (₹)</th><th class="num">Margin % (auto)</th><th class="num">GST %</th></tr></thead>
@@ -529,6 +529,64 @@ async function saveBulkEdits(){
   await loadAll();
   nav('bulkEdit');
   alert(`Saved cost data for ${done} products. Selling prices are unchanged; margins are now calculated correctly.`);
+}
+
+// ---------- AUTO-ESTIMATE PURCHASE PRICE FROM MARKUP RATIO ----------
+function placeholderProducts(){
+  // products where purchase price still equals selling price — i.e. real cost was never entered
+  return state.products.filter(p => Number(p.purchase_price) === Number(p.selling_price));
+}
+function openAutoEstimateModal(){
+  const targets = placeholderProducts();
+  openModal(`
+    <h2>Auto-estimate purchase price</h2>
+    <p class="role-note">Applies to the ${targets.length} product${targets.length===1?'':'s'} that still show purchase price = selling price (i.e. real cost not yet entered). Products you've already corrected are left untouched.</p>
+    <div class="field" style="margin-top:16px;"><label>Your usual markup — selling price is about this many times your cost</label>
+      <input type="number" id="markupRatio" value="4.4" step="0.1">
+    </div>
+    <p class="role-note" id="markupPreview"></p>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px;">
+      <button class="secondary" onclick="closeModal()">Cancel</button>
+      <button class="gold" id="runEstimateBtn" onclick="runAutoEstimate()">Apply estimate to ${targets.length} products</button>
+    </div>
+  `);
+  document.getElementById('markupRatio').addEventListener('input', updateMarkupPreview);
+  updateMarkupPreview();
+}
+function updateMarkupPreview(){
+  const ratio = parseFloat(document.getElementById('markupRatio').value) || 1;
+  const sample = placeholderProducts()[0];
+  if(sample){
+    const est = sample.selling_price / ratio;
+    document.getElementById('markupPreview').textContent = `Example: "${sample.name}" sells at ${inr(sample.selling_price)} → estimated purchase price ${inr(est)}.`;
+  }
+}
+async function runAutoEstimate(){
+  const ratio = parseFloat(document.getElementById('markupRatio').value);
+  if(!ratio || ratio<=1){ alert('Enter a markup greater than 1 (e.g. 4 means you sell at 4x cost).'); return; }
+  const targets = placeholderProducts();
+  const btn = document.getElementById('runEstimateBtn');
+  btn.disabled = true;
+  const marginPct = (ratio-1)*100;
+  let done = 0;
+  for(const p of targets){
+    btn.textContent = `Estimating ${done+1} of ${targets.length}…`;
+    const estimatedPurchase = Math.round((p.selling_price / ratio) * 100) / 100;
+    const {data: updated} = await sb.from('products').update({
+      purchase_price: estimatedPurchase,
+      additional_charge_pct: 0,
+      additional_charge_fixed: 0,
+      margin_pct: marginPct,
+    }).eq('product_id', p.product_id).select().single();
+    if(updated){
+      await sb.from('sale_items').update({landing_price_snapshot: updated.landing_price}).eq('product_id', p.product_id);
+    }
+    done++;
+  }
+  closeModal();
+  await loadAll();
+  nav('bulkEdit');
+  alert(`Estimated purchase price for ${done} products using a ${ratio}x markup. Go through Bulk Edit and correct any that are actually different.`);
 }
 
 // ================= CUSTOMERS =================
