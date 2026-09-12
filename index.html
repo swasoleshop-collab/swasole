@@ -429,15 +429,20 @@ async function saveProduct(id){
     low_stock_threshold: parseFloat(document.getElementById('f_lowstock').value)||2,
   };
   let productId = id;
-  let error;
+  let error, updatedProduct;
   if(id){
-    ({error} = await sb.from('products').update(data).eq('product_id', id));
+    const res = await sb.from('products').update(data).eq('product_id', id).select().single();
+    error = res.error; updatedProduct = res.data;
   }else{
     const res = await sb.from('products').insert(data).select().single();
     error = res.error;
     if(!error) productId = res.data.product_id;
   }
   if(error){ alert('Could not save product: '+error.message); btn.disabled=false; btn.textContent='Save'; return; }
+
+  if(id && updatedProduct){
+    await sb.from('sale_items').update({landing_price_snapshot: updatedProduct.landing_price}).eq('product_id', id);
+  }
 
   if(window._pendingImage){
     await sb.from('product_images').delete().eq('product_id', productId);
@@ -460,37 +465,33 @@ function renderBulkEdit(main){
   bulkEditChanges = {};
   main.innerHTML = `
     <div class="topbar"><h1>Bulk edit pricing</h1><button class="secondary" onclick="nav('products')">Back to products</button></div>
-    <p class="role-note" style="margin-bottom:16px;">Edit purchase price, extra charges, and margin for many products at once. Landing &amp; selling price recalculate automatically when you save.</p>
+    <p class="role-note" style="margin-bottom:16px;">Enter the real purchase price for each product. <strong>Selling price stays exactly as it is</strong> unless you deliberately change it — margin % is calculated for you automatically, purely for your profit reports.</p>
     <table>
-      <thead><tr><th>Product</th><th class="num">Purchase (₹)</th><th class="num">Addl %</th><th class="num">Addl ₹</th><th class="num">Margin %</th><th class="num">GST %</th><th class="num">Landing</th><th class="num">Selling</th></tr></thead>
+      <thead><tr><th>Product</th><th class="num">Purchase (₹)</th><th class="num">Selling price (₹)</th><th class="num">Margin % (auto)</th><th class="num">GST %</th></tr></thead>
       <tbody id="bulkRows"></tbody>
     </table>
     <button class="gold" id="bulkSaveBtn" style="margin-top:18px;" onclick="saveBulkEdits()">Save all changes</button>
   `;
   const rows = document.getElementById('bulkRows');
-  if(state.products.length===0){ rows.innerHTML = `<tr><td colspan="8"><div class="empty">No products yet.</div></td></tr>`; return; }
+  if(state.products.length===0){ rows.innerHTML = `<tr><td colspan="5"><div class="empty">No products yet.</div></td></tr>`; return; }
   rows.innerHTML = state.products.map(p => `
     <tr data-id="${p.product_id}">
       <td>${p.name} <span class="tag">${p.sku}</span></td>
-      <td><input type="number" value="${p.purchase_price}" style="width:90px;" oninput="bulkFieldChange('${p.product_id}','purchase_price',this.value)"></td>
-      <td><input type="number" value="${p.additional_charge_pct}" style="width:70px;" oninput="bulkFieldChange('${p.product_id}','additional_charge_pct',this.value)"></td>
-      <td><input type="number" value="${p.additional_charge_fixed}" style="width:70px;" oninput="bulkFieldChange('${p.product_id}','additional_charge_fixed',this.value)"></td>
-      <td><input type="number" value="${p.margin_pct}" style="width:70px;" oninput="bulkFieldChange('${p.product_id}','margin_pct',this.value)"></td>
+      <td><input type="number" value="${p.purchase_price}" style="width:100px;" oninput="bulkFieldChange('${p.product_id}','purchase_price',this.value)"></td>
+      <td><input type="number" value="${p.selling_price}" style="width:100px;" oninput="bulkFieldChange('${p.product_id}','selling_price',this.value)"></td>
+      <td class="num" id="margin_${p.product_id}">${p.purchase_price>0 ? (((p.selling_price/p.purchase_price)-1)*100).toFixed(1) : '0.0'}%</td>
       <td><input type="number" value="${p.gst_rate}" style="width:60px;" oninput="bulkFieldChange('${p.product_id}','gst_rate',this.value)"></td>
-      <td class="num" id="landing_${p.product_id}">${inr(p.landing_price)}</td>
-      <td class="num" id="selling_${p.product_id}">${inr(p.selling_price)}</td>
     </tr>`).join('');
 }
 function bulkFieldChange(productId, field, value){
   if(!bulkEditChanges[productId]) bulkEditChanges[productId] = {};
   bulkEditChanges[productId][field] = parseFloat(value)||0;
-  // live preview of landing/selling using current row values
+  if(field==='gst_rate') return; // doesn't affect margin display
   const p = state.products.find(p=>p.product_id===productId);
-  const merged = {...p, ...bulkEditChanges[productId]};
-  const landing = (merged.purchase_price * (1+merged.additional_charge_pct/100)) + merged.additional_charge_fixed;
-  const selling = landing * (1+merged.margin_pct/100);
-  document.getElementById('landing_'+productId).textContent = inr(landing);
-  document.getElementById('selling_'+productId).textContent = inr(selling);
+  const purchase = bulkEditChanges[productId].purchase_price ?? p.purchase_price;
+  const selling = bulkEditChanges[productId].selling_price ?? p.selling_price;
+  const marginEl = document.getElementById('margin_'+productId);
+  marginEl.textContent = purchase>0 ? (((selling/purchase)-1)*100).toFixed(1)+'%' : '0.0%';
 }
 async function saveBulkEdits(){
   const ids = Object.keys(bulkEditChanges);
@@ -500,13 +501,30 @@ async function saveBulkEdits(){
   let done = 0;
   for(const id of ids){
     btn.textContent = `Saving ${done+1} of ${ids.length}…`;
-    await sb.from('products').update(bulkEditChanges[id]).eq('product_id', id);
+    const p = state.products.find(p=>p.product_id===id);
+    const changes = bulkEditChanges[id];
+    const purchase = changes.purchase_price ?? p.purchase_price;
+    const targetSelling = changes.selling_price ?? p.selling_price;
+    // back-solve margin_pct so selling_price lands exactly on the target, with additional charges zeroed for simplicity
+    const marginPct = purchase>0 ? ((targetSelling/purchase)-1)*100 : 0;
+    const updateData = {
+      purchase_price: purchase,
+      additional_charge_pct: 0,
+      additional_charge_fixed: 0,
+      margin_pct: marginPct,
+    };
+    if(changes.gst_rate !== undefined) updateData.gst_rate = changes.gst_rate;
+    const {data: updated} = await sb.from('products').update(updateData).eq('product_id', id).select().single();
+    if(updated){
+      // refresh cost snapshot on already-recorded bills for this product so profit KPIs reflect the corrected cost
+      await sb.from('sale_items').update({landing_price_snapshot: updated.landing_price}).eq('product_id', id);
+    }
     done++;
   }
   bulkEditChanges = {};
   await loadAll();
   nav('bulkEdit');
-  alert(`Saved pricing for ${done} products.`);
+  alert(`Saved cost data for ${done} products. Selling prices are unchanged; margins are now calculated correctly.`);
 }
 
 // ================= CUSTOMERS =================
@@ -809,7 +827,7 @@ async function completeSale(){
 // ================= ORDERS / BILLS =================
 function renderOrders(main){
   main.innerHTML = `
-    <div class="topbar"><h1>Orders</h1><div style="display:flex;align-items:center;gap:12px;"><span class="role-note">All bills — view, print, send, or delete</span><button class="secondary" onclick="openOrderImportModal()">Import from Shopify</button></div></div>
+    <div class="topbar"><h1>Orders</h1><div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><span class="role-note">All bills — view, print, send, or delete</span><button class="secondary" onclick="openOrderImportModal()">Import from Shopify</button><button class="secondary" onclick="openHistoricalSaleModal()">Add past offline sale</button></div></div>
     <table>
       <thead><tr><th>Invoice</th><th>Date</th><th>Customer</th><th>Channel</th><th class="num">Amount</th><th></th></tr></thead>
       <tbody id="orderRows"></tbody>
@@ -1009,6 +1027,121 @@ async function runOrderImport(){
   closeModal();
   await loadAll();
   alert(`Imported ${done} orders.${skippedItems>0 ? ` ${skippedItems} line items were skipped (no matching SKU).` : ''} Stock was not changed.`);
+}
+
+// ---------- ADD PAST OFFLINE SALE (no stock impact) ----------
+let histCart = [];
+function openHistoricalSaleModal(){
+  histCart = [];
+  openModal(`
+    <h2>Add a past offline sale</h2>
+    <p class="role-note">For sales that already happened before you started using this system. Stock will NOT be changed, since your current stock already accounts for it — this just records the sale for your reports and customer history.</p>
+    <div class="grid2" style="margin-top:14px;">
+      <div class="field"><label>Sale date</label><input type="date" id="h_date" value="${new Date().toISOString().slice(0,10)}"></div>
+      <div class="field"><label>Payment method</label><select id="h_payment"><option>Cash</option><option>Card</option><option>UPI</option></select></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>Customer name (optional)</label><input id="h_custname" list="custNames"></div>
+      <div class="field"><label>Phone</label><input id="h_custphone"></div>
+    </div>
+    <div class="field"><label>Add product</label>
+      <select id="h_productSelect"><option value="">Choose a product…</option>${state.products.map(p=>`<option value="${p.product_id}">${p.name} (${p.sku})</option>`).join('')}</select>
+    </div>
+    <div class="grid3">
+      <div class="field"><label>Qty</label><input type="number" id="h_qty" value="1" min="1"></div>
+      <div class="field"><label>Price sold at (₹)</label><input type="number" id="h_price"></div>
+      <div class="field" style="display:flex;align-items:flex-end;"><button class="secondary" style="width:100%;" onclick="addHistItem()">+ Add item</button></div>
+    </div>
+    <div id="histCartLines" style="margin:14px 0;"></div>
+    <div class="grid2">
+      <div class="field"><label>Discount (₹)</label><input type="number" id="h_discount" value="0"></div>
+      <div class="field"><label>Sale type</label><select id="h_stateType"><option value="intra-state">Intra-state</option><option value="inter-state">Inter-state</option></select></div>
+    </div>
+    <div id="histTotalPreview" class="role-note" style="margin-bottom:14px;"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;">
+      <button class="secondary" onclick="closeModal()">Cancel</button>
+      <button class="gold" id="saveHistBtn" onclick="saveHistoricalSale()">Save past sale</button>
+    </div>
+  `);
+  // prefill price when a product is chosen
+  document.getElementById('h_productSelect').addEventListener('change', function(){
+    const p = state.products.find(p=>p.product_id===this.value);
+    if(p) document.getElementById('h_price').value = p.selling_price;
+  });
+  renderHistCartLines();
+}
+function addHistItem(){
+  const productId = document.getElementById('h_productSelect').value;
+  const qty = parseInt(document.getElementById('h_qty').value)||1;
+  const price = parseFloat(document.getElementById('h_price').value);
+  if(!productId || isNaN(price)){ alert('Choose a product and a price.'); return; }
+  histCart.push({productId, qty, price});
+  renderHistCartLines();
+}
+function removeHistItem(i){ histCart.splice(i,1); renderHistCartLines(); }
+function renderHistCartLines(){
+  const el = document.getElementById('histCartLines');
+  if(histCart.length===0){ el.innerHTML = `<div class="empty">No items added yet.</div>`; document.getElementById('histTotalPreview').textContent=''; return; }
+  el.innerHTML = histCart.map((l,i)=>{
+    const p = state.products.find(p=>p.product_id===l.productId);
+    return `<div class="cart-line"><span>${p.name} × ${l.qty}</span><span class="num">${inr(l.price*l.qty)} <button class="small secondary" style="margin-left:6px;" onclick="removeHistItem(${i})">×</button></span></div>`;
+  }).join('');
+  const subtotal = histCart.reduce((a,l)=>a+l.price*l.qty,0);
+  document.getElementById('histTotalPreview').textContent = `Subtotal so far: ${inr(subtotal)}`;
+}
+async function saveHistoricalSale(){
+  if(histCart.length===0){ alert('Add at least one item.'); return; }
+  const btn = document.getElementById('saveHistBtn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const custName = document.getElementById('h_custname').value.trim();
+  const custPhone = document.getElementById('h_custphone').value.trim();
+  let customerId = null;
+  if(custName){
+    let existing = custPhone ? state.customers.find(c=>c.phone===custPhone) : state.customers.find(c=>c.name.toLowerCase()===custName.toLowerCase());
+    if(existing) customerId = existing.customer_id;
+    else{
+      const {data:newCust} = await sb.from('customers').insert({name:custName, phone:custPhone}).select().single();
+      if(newCust) customerId = newCust.customer_id;
+    }
+  }
+  const subtotal = histCart.reduce((a,l)=>a+l.price*l.qty,0);
+  const discount = parseFloat(document.getElementById('h_discount').value)||0;
+  const finalAmount = Math.max(0, subtotal - discount);
+  let gstWeighted = 0;
+  histCart.forEach(l=>{ const p = state.products.find(p=>p.product_id===l.productId); gstWeighted += (p.gst_rate * l.price*l.qty); });
+  const avgGst = subtotal>0 ? gstWeighted/subtotal : 0;
+  const taxable = finalAmount / (1+avgGst/100);
+  const totalGst = finalAmount - taxable;
+  const stateType = document.getElementById('h_stateType').value;
+  const dateVal = document.getElementById('h_date').value;
+
+  const {data: sale, error: saleErr} = await sb.from('sales').insert({
+    invoice_number: 'OFF-' + Date.now().toString().slice(-8),
+    customer_id: customerId,
+    channel: 'store',
+    sale_date: dateVal,
+    subtotal_before_discount: subtotal,
+    discount_value: discount,
+    final_amount: finalAmount,
+    taxable_value: taxable,
+    cgst_amount: stateType==='intra-state' ? totalGst/2 : 0,
+    sgst_amount: stateType==='intra-state' ? totalGst/2 : 0,
+    igst_amount: stateType==='inter-state' ? totalGst : 0,
+    state_type: stateType,
+    payment_method: document.getElementById('h_payment').value,
+  }).select().single();
+  if(saleErr){ alert('Could not save: '+saleErr.message); btn.disabled=false; btn.textContent='Save past sale'; return; }
+
+  const items = histCart.map(l=>{
+    const p = state.products.find(p=>p.product_id===l.productId);
+    return {sale_id: sale.sale_id, product_id: p.product_id, quantity: l.qty, unit_price: l.price, landing_price_snapshot: p.landing_price, line_total: l.price*l.qty};
+  });
+  await sb.from('sale_items').insert(items);
+  // deliberately no inventory_transactions or stock_qty change — this sale already happened before tracking started
+
+  closeModal();
+  await loadAll();
+  alert('Past sale recorded: ' + sale.invoice_number);
 }
 
 // ================= DASHBOARD =================
