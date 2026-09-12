@@ -825,16 +825,33 @@ async function completeSale(){
 }
 
 // ================= ORDERS / BILLS =================
+let ordersSortMode = 'billnum';
+function naturalCompare(a, b){
+  // sorts "2" before "10", and handles mixed text+number bill numbers sensibly
+  return a.localeCompare(b, undefined, {numeric:true, sensitivity:'base'});
+}
 function renderOrders(main){
   main.innerHTML = `
     <div class="topbar"><h1>Orders</h1><div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><span class="role-note">All bills — view, print, send, or delete</span><button class="secondary" onclick="openOrderImportModal()">Import from Shopify</button><button class="secondary" onclick="openHistoricalSaleModal()">Add past offline sale</button></div></div>
+    <div class="filters">
+      <div class="field"><label>Sort by</label>
+        <select id="ordersSortSelect" onchange="ordersSortMode=this.value; renderOrders(document.getElementById('main'))">
+          <option value="billnum" ${ordersSortMode==='billnum'?'selected':''}>Bill number</option>
+          <option value="date" ${ordersSortMode==='date'?'selected':''}>Date (newest first)</option>
+        </select>
+      </div>
+    </div>
     <table>
       <thead><tr><th>Invoice</th><th>Date</th><th>Customer</th><th>Channel</th><th class="num">Amount</th><th></th></tr></thead>
       <tbody id="orderRows"></tbody>
     </table>`;
   const rows = document.getElementById('orderRows');
   if(state.sales.length===0){ rows.innerHTML = `<tr><td colspan="6"><div class="empty">No bills yet.</div></td></tr>`; return; }
-  const sorted = [...state.sales].sort((a,b)=> new Date(b.sale_date) - new Date(a.sale_date));
+  const sorted = [...state.sales].sort((a,b)=>
+    ordersSortMode === 'billnum'
+      ? naturalCompare(a.invoice_number||'', b.invoice_number||'')
+      : new Date(b.sale_date) - new Date(a.sale_date)
+  );
   rows.innerHTML = sorted.map(s=>{
     const cust = state.customers.find(c=>c.customer_id===s.customer_id);
     return `<tr style="cursor:pointer;" onclick="openOrderDetail('${s.sale_id}')">
@@ -874,6 +891,14 @@ function openOrderDetail(saleId){
       <p class="role-note" style="margin-top:6px;">Payment: ${s.payment_method || '—'}</p>
     </div>
     <div class="hairline no-print"></div>
+    <div class="no-print field">
+      <label>Bill number (edit to match your own numbering)</label>
+      <div style="display:flex;gap:8px;">
+        <input id="editInvoiceNum" value="${s.invoice_number}">
+        <button class="secondary small" onclick="updateInvoiceNumber('${s.sale_id}')">Save number</button>
+      </div>
+    </div>
+    <div class="hairline no-print"></div>
     <div class="no-print" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:space-between;">
       <button class="secondary" onclick="deleteOrder('${s.sale_id}')">Delete bill</button>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -883,6 +908,18 @@ function openOrderDetail(saleId){
     </div>
     <div class="no-print" style="text-align:right;margin-top:14px;"><button class="secondary" onclick="closeModal()">Close</button></div>
   `);
+}
+async function updateInvoiceNumber(saleId){
+  const newNum = document.getElementById('editInvoiceNum').value.trim();
+  if(!newNum){ alert('Bill number cannot be empty.'); return; }
+  const {error} = await sb.from('sales').update({invoice_number: newNum}).eq('sale_id', saleId);
+  if(error){
+    if(error.message.includes('duplicate') || error.code==='23505') alert('That bill number is already used on another invoice — choose a different one.');
+    else alert('Could not update: '+error.message);
+    return;
+  }
+  await loadAll();
+  openOrderDetail(saleId);
 }
 function printInvoice(){
   window.print();
@@ -1038,12 +1075,13 @@ function openHistoricalSaleModal(){
     <p class="role-note">For sales that already happened before you started using this system. Stock will NOT be changed, since your current stock already accounts for it — this just records the sale for your reports and customer history.</p>
     <div class="grid2" style="margin-top:14px;">
       <div class="field"><label>Sale date</label><input type="date" id="h_date" value="${new Date().toISOString().slice(0,10)}"></div>
-      <div class="field"><label>Payment method</label><select id="h_payment"><option>Cash</option><option>Card</option><option>UPI</option></select></div>
+      <div class="field"><label>Bill number (your own numbering)</label><input id="h_billnum" placeholder="e.g. 1042 or SW-1042"></div>
     </div>
     <div class="grid2">
+      <div class="field"><label>Payment method</label><select id="h_payment"><option>Cash</option><option>Card</option><option>UPI</option></select></div>
       <div class="field"><label>Customer name (optional)</label><input id="h_custname" list="custNames"></div>
-      <div class="field"><label>Phone</label><input id="h_custphone"></div>
     </div>
+    <div class="field"><label>Phone</label><input id="h_custphone"></div>
     <div class="field"><label>Add product</label>
       <select id="h_productSelect"><option value="">Choose a product…</option>${state.products.map(p=>`<option value="${p.product_id}">${p.name} (${p.sku})</option>`).join('')}</select>
     </div>
@@ -1114,9 +1152,10 @@ async function saveHistoricalSale(){
   const totalGst = finalAmount - taxable;
   const stateType = document.getElementById('h_stateType').value;
   const dateVal = document.getElementById('h_date').value;
+  const customBillNum = document.getElementById('h_billnum').value.trim();
 
   const {data: sale, error: saleErr} = await sb.from('sales').insert({
-    invoice_number: 'OFF-' + Date.now().toString().slice(-8),
+    invoice_number: customBillNum || ('OFF-' + Date.now().toString().slice(-8)),
     customer_id: customerId,
     channel: 'store',
     sale_date: dateVal,
@@ -1130,7 +1169,11 @@ async function saveHistoricalSale(){
     state_type: stateType,
     payment_method: document.getElementById('h_payment').value,
   }).select().single();
-  if(saleErr){ alert('Could not save: '+saleErr.message); btn.disabled=false; btn.textContent='Save past sale'; return; }
+  if(saleErr){
+    if(saleErr.message.includes('duplicate') || saleErr.code==='23505') alert('That bill number is already used on another invoice — choose a different one.');
+    else alert('Could not save: '+saleErr.message);
+    btn.disabled=false; btn.textContent='Save past sale'; return;
+  }
 
   const items = histCart.map(l=>{
     const p = state.products.find(p=>p.product_id===l.productId);
