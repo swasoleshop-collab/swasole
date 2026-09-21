@@ -19,6 +19,8 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:'Inter',sans-ser
 h1,h2,h3{font-family:'Cormorant Garamond',serif;font-weight:600;margin:0;}
 h1{font-size:26px;} h2{font-size:20px;} h3{font-size:17px;}
 .app{display:flex;min-height:100vh;}
+.login-screen{min-height:100vh;align-items:center;justify-content:center;background:var(--bg);}
+.login-screen.show{display:flex;}
 .sidebar{width:210px;flex-shrink:0;background:var(--surface);border-right:1px solid var(--line);padding:28px 0 20px;display:flex;flex-direction:column;}
 .sidebar .brand{padding:0 24px 24px;border-bottom:1px solid var(--line);margin-bottom:12px;}
 .navitem{padding:11px 24px;color:var(--ink-soft);cursor:pointer;font-size:13px;letter-spacing:0.02em;border-left:2px solid transparent;display:flex;align-items:center;gap:10px;}
@@ -92,7 +94,16 @@ tr:hover td{background:#FCFAF6;}
 </style>
 </head>
 <body>
-<div class="app">
+<div id="loginScreen" class="login-screen" style="display:none;">
+  <div style="width:100%;max-width:340px;padding:32px;">
+    <div class="brand" style="text-align:center;margin-bottom:24px;">Swasole</div>
+    <div class="field"><label>Email</label><input id="loginEmail" type="email" autocomplete="username"></div>
+    <div class="field"><label>Password</label><input id="loginPassword" type="password" autocomplete="current-password"></div>
+    <div id="loginError" style="color:var(--rose);font-size:12.5px;margin-bottom:10px;"></div>
+    <button class="gold" id="loginBtn" style="width:100%;" onclick="doLogin()">Log in</button>
+  </div>
+</div>
+<div class="app" id="appShell" style="display:none;">
   <div class="sidebar" id="sidebar"></div>
   <div class="main" id="main"></div>
 </div>
@@ -183,7 +194,8 @@ function render(){
 }
 function renderSidebar(){
   document.getElementById('sidebar').innerHTML = `<div class="brand">Swasole</div>` +
-    NAV.map(n => `<div class="navitem ${state.route===n.id?'active':''}" onclick="nav('${n.id}')">${n.label}</div>`).join('');
+    NAV.map(n => `<div class="navitem ${state.route===n.id?'active':''}" onclick="nav('${n.id}')">${n.label}</div>`).join('') +
+    `<div class="navitem" style="margin-top:auto;color:var(--rose);" onclick="doLogout()">Log out</div>`;
 }
 function renderMobileTabs(){
   document.getElementById('mobileTabs').innerHTML = NAV.map(n => `<div class="navitem ${state.route===n.id?'active':''}" onclick="nav('${n.id}')">${n.label}</div>`).join('');
@@ -192,34 +204,131 @@ function closeModal(){ document.getElementById('modalRoot').innerHTML = ''; }
 function openModal(html){ document.getElementById('modalRoot').innerHTML = `<div class="modal-backdrop" onclick="if(event.target===this)closeModal()"><div class="modal">${html}</div></div>`; }
 
 // ================= PRODUCTS =================
+let selectedProductIds = new Set();
+let productFilter = 'all'; // all | online | offline
 function renderProducts(main){
   main.innerHTML = `
     <div class="topbar">
       <h1>Products</h1>
-      <div style="display:flex;gap:10px;">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
         <button class="secondary" onclick="openCategoryModal()">Manage categories</button>
         <button class="secondary" onclick="openImportModal()">Import from Shopify</button>
         <button class="secondary" onclick="nav('bulkEdit')">Bulk edit pricing</button>
         <button class="gold" onclick="openProductModal()">+ Add product</button>
       </div>
     </div>
+    <div class="filters">
+      <div class="field"><label>Show</label>
+        <select id="prodFilterSelect" onchange="productFilter=this.value; selectedProductIds.clear(); renderProducts(document.getElementById('main'))">
+          <option value="all" ${productFilter==='all'?'selected':''}>All products</option>
+          <option value="online" ${productFilter==='online'?'selected':''}>Online (on Shopify)</option>
+          <option value="offline" ${productFilter==='offline'?'selected':''}>Offline (not on Shopify)</option>
+        </select>
+      </div>
+    </div>
+    <div id="bulkActionBar"></div>
     <table>
-      <thead><tr><th></th><th>SKU</th><th>Name</th><th>Category</th><th class="num">Landing</th><th class="num">Selling</th><th class="num">Stock</th><th></th></tr></thead>
+      <thead><tr><th></th><th></th><th>SKU</th><th>Name</th><th>Category</th><th class="num">Selling</th><th class="num">Stock</th><th>Listing</th><th>Status</th><th></th></tr></thead>
       <tbody id="productRows"></tbody>
     </table>`;
+  const visible = state.products.filter(p => productFilter==='all' ? true : productFilter==='online' ? p.listed_on_shopify : !p.listed_on_shopify);
   const rows = document.getElementById('productRows');
-  if(state.products.length===0){ rows.innerHTML = `<tr><td colspan="8"><div class="empty">No products yet. Add your first piece.</div></td></tr>`; return; }
-  rows.innerHTML = state.products.map(p => `
+  renderBulkActionBar();
+  if(visible.length===0){ rows.innerHTML = `<tr><td colspan="10"><div class="empty">No products in this view.</div></td></tr>`; return; }
+  rows.innerHTML = visible.map(p => `
     <tr>
+      <td><input type="checkbox" ${selectedProductIds.has(p.product_id)?'checked':''} onchange="toggleProductSelect('${p.product_id}', this.checked)"></td>
       <td><div class="imgbox">${p.image ? `<img src="${p.image}">` : 'no photo'}</div></td>
       <td>${p.sku}</td><td>${p.name}</td>
       <td><span class="tag">${catName(p.category_id)}</span></td>
-      <td class="num">${inr(p.landing_price)}</td>
       <td class="num">${inr(p.selling_price)}</td>
       <td class="num ${p.stock_qty<=p.low_stock_threshold ? 'badge-low' : ''}">${p.stock_qty}</td>
+      <td><span class="tag" style="${p.listed_on_shopify?'color:var(--sage);':'color:var(--gold-deep);'}">${p.listed_on_shopify?'Online':'Offline'}</span></td>
+      <td><span class="tag">${(p.status||'active')}</span></td>
       <td><button class="small secondary" onclick="openProductModal('${p.product_id}')">Edit</button></td>
     </tr>`).join('');
 }
+function toggleProductSelect(id, checked){
+  if(checked) selectedProductIds.add(id); else selectedProductIds.delete(id);
+  renderBulkActionBar();
+  // just update the bar, no need to re-render whole table
+}
+function renderBulkActionBar(){
+  const el = document.getElementById('bulkActionBar');
+  if(!el) return;
+  if(selectedProductIds.size===0){ el.innerHTML=''; return; }
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;background:var(--bg);border:1px solid var(--line);padding:10px 14px;margin-bottom:14px;flex-wrap:wrap;">
+      <span style="font-size:13px;">${selectedProductIds.size} selected</span>
+      <button class="small secondary" onclick="exportSelectedToShopifyCsv()">Export to Shopify CSV</button>
+      <button class="small secondary" onclick="bulkSetStatus('draft')">Set to Draft</button>
+      <button class="small secondary" onclick="bulkSetStatus('active')">Set to Active</button>
+      <button class="small secondary" onclick="bulkSetStatus('archived')">Archive</button>
+      <button class="small secondary" onclick="bulkDeleteProducts()">Delete selected</button>
+      <button class="small secondary" onclick="selectedProductIds.clear(); renderProducts(document.getElementById('main'))">Clear selection</button>
+    </div>`;
+}
+async function bulkSetStatus(status){
+  const ids = [...selectedProductIds];
+  for(const id of ids){ await sb.from('products').update({status}).eq('product_id', id); }
+  selectedProductIds.clear();
+  await loadAll();
+  nav('products');
+}
+async function bulkDeleteProducts(){
+  const ids = [...selectedProductIds];
+  if(!confirm(`Delete ${ids.length} product(s)? This can't be undone.`)) return;
+  for(const id of ids){ await sb.from('products').delete().eq('product_id', id); }
+  selectedProductIds.clear();
+  await loadAll();
+  nav('products');
+}
+function exportSelectedToShopifyCsv(){
+  const ids = [...selectedProductIds];
+  const rows = state.products.filter(p=>ids.includes(p.product_id));
+  const header = ['Handle','Title','Body (HTML)','Vendor','Type','Tags','Published','Option1 Name','Option1 Value',
+    'Variant SKU','Variant Price','Variant Inventory Qty','Variant Inventory Policy','Variant Fulfillment Service',
+    'Image Src','Status'];
+  const csvRows = rows.map(p=>{
+    const handle = (p.name || p.sku).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'') || p.sku.toLowerCase();
+    return [
+      handle,
+      p.name || '',
+      p.description || '',
+      state.company?.company_name || '',
+      catName(p.category_id) || '',
+      '',
+      'TRUE',
+      'Title',
+      'Default Title',
+      p.sku,
+      p.selling_price,
+      p.stock_qty,
+      'deny',
+      'manual',
+      p.image || '',
+      'active',
+    ].map(v => `"${String(v).replace(/"/g,'""')}"`).join(',');
+  });
+  const csv = [header.join(','), ...csvRows].join('\n');
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `shopify-import-${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+  if(confirm(`Downloaded ${rows.length} product(s) as a Shopify import file. Mark these as "Online" now that you're uploading them?`)){
+    markSelectedOnline(ids);
+  }
+}
+async function markSelectedOnline(ids){
+  for(const id of ids){ await sb.from('products').update({listed_on_shopify:true}).eq('product_id', id); }
+  selectedProductIds.clear();
+  await loadAll();
+  nav('products');
+}
+
 function openCategoryModal(){
   openModal(`<h2>Categories</h2>
     <p class="role-note">Add, rename, or remove categories — changes apply everywhere instantly.</p>
@@ -351,6 +460,7 @@ async function runImport(){
       gst_rate: 3,
       stock_qty: row.stock,
       low_stock_threshold: 2,
+      listed_on_shopify: true,
     }).select().single();
     if(!prodErr && row.image){
       await sb.from('product_images').insert({product_id: product.product_id, image_url: row.image, is_primary: true});
@@ -375,7 +485,8 @@ function openProductModal(id){
       <div class="field"><label>SKU</label><input id="f_sku" value="${existing?existing.sku:''}"></div>
       <div class="field"><label>Category</label><select id="f_cat">${catOptions}</select></div>
     </div>
-    <div class="field"><label>Product name</label><input id="f_name" value="${existing?existing.name:''}"></div>
+    <div class="field"><label>Product name ${existing?'':'<span class="role-note">(optional for offline items — add later before uploading to Shopify)</span>'}</label><input id="f_name" value="${existing?existing.name:''}"></div>
+    <div class="field"><label>Description <span class="role-note">(optional — used when exporting to Shopify)</span></label><textarea id="f_description" rows="2" style="font-family:'Inter',sans-serif;padding:9px 11px;border:1px solid var(--line);width:100%;font-size:13.5px;">${existing?existing.description||'':''}</textarea></div>
     <div class="grid3">
       <div class="field"><label>Purchase price (₹)</label><input id="f_purchase" type="number" value="${existing?existing.purchase_price:''}" oninput="previewPricing()"></div>
       <div class="field"><label>Additional charges (%)</label><input id="f_addlpct" type="number" value="${existing?existing.additional_charge_pct:0}" oninput="previewPricing()"></div>
@@ -386,7 +497,11 @@ function openProductModal(id){
       <div class="field"><label>GST rate (%)</label><input id="f_gst" type="number" value="${existing?existing.gst_rate:3}"></div>
       <div class="field"><label>Stock qty</label><input id="f_stock" type="number" value="${existing?existing.stock_qty:0}"></div>
     </div>
-    <div class="field"><label>Low-stock alert threshold</label><input id="f_lowstock" type="number" value="${existing?existing.low_stock_threshold:2}"></div>
+    <div class="grid3">
+      <div class="field"><label>Low-stock alert threshold</label><input id="f_lowstock" type="number" value="${existing?existing.low_stock_threshold:2}"></div>
+      <div class="field"><label>Listing</label><select id="f_listed"><option value="false" ${existing&&!existing.listed_on_shopify?'selected':''}>Offline (not on Shopify)</option><option value="true" ${existing&&existing.listed_on_shopify?'selected':''}>Online (on Shopify)</option></select></div>
+      <div class="field"><label>Status</label><select id="f_status"><option value="active" ${existing&&existing.status==='active'?'selected':''}>Active</option><option value="draft" ${existing&&existing.status==='draft'?'selected':''}>Draft</option><option value="archived" ${existing&&existing.status==='archived'?'selected':''}>Archived</option></select></div>
+    </div>
     <div class="hairline"></div>
     <div id="pricingPreview" style="font-size:13px;color:var(--ink-soft);margin-bottom:16px;"></div>
     <div style="display:flex;justify-content:space-between;">
@@ -438,6 +553,7 @@ async function saveProduct(id){
     sku: document.getElementById('f_sku').value || ('SW-'+Date.now().toString().slice(-5)),
     category_id: document.getElementById('f_cat').value,
     name: document.getElementById('f_name').value || 'Untitled',
+    description: document.getElementById('f_description').value,
     purchase_price: parseFloat(document.getElementById('f_purchase').value)||0,
     additional_charge_pct: parseFloat(document.getElementById('f_addlpct').value)||0,
     additional_charge_fixed: parseFloat(document.getElementById('f_addlfixed').value)||0,
@@ -445,6 +561,8 @@ async function saveProduct(id){
     gst_rate: parseFloat(document.getElementById('f_gst').value)||0,
     stock_qty: parseFloat(document.getElementById('f_stock').value)||0,
     low_stock_threshold: parseFloat(document.getElementById('f_lowstock').value)||2,
+    listed_on_shopify: document.getElementById('f_listed').value === 'true',
+    status: document.getElementById('f_status').value,
   };
   let productId = id;
   let error, updatedProduct;
@@ -1438,7 +1556,15 @@ async function runOrderImport(){
       }
     }
     const finalAmount = g.total;
-    const taxable = finalAmount - g.taxes;
+    // Shopify's own "Taxes" export is frequently 0 even when the price genuinely includes GST
+    // (common when GST wasn't configured as a separate line in Shopify). So instead of trusting
+    // that column, we impute GST the same way the rest of the app does: work backward from the
+    // final amount actually paid, using each item's own GST rate where we can match the product.
+    let gstWeighted = 0;
+    g.items.forEach(it=>{ const p = matchProductForItem(it); gstWeighted += (p ? p.gst_rate : 3) * it.price*it.qty; });
+    const avgGst = finalAmount>0 ? gstWeighted/finalAmount : 3;
+    const taxable = finalAmount / (1+avgGst/100);
+    const totalGst = finalAmount - taxable;
     const {data: sale, error: saleErr} = await sb.from('sales').insert({
       invoice_number: g.orderName,
       customer_id: customerId,
@@ -1448,7 +1574,7 @@ async function runOrderImport(){
       discount_value: g.discount,
       final_amount: finalAmount,
       taxable_value: taxable,
-      cgst_amount: g.taxes/2, sgst_amount: g.taxes/2, igst_amount: 0,
+      cgst_amount: totalGst/2, sgst_amount: totalGst/2, igst_amount: 0,
       state_type: 'intra-state',
       payment_method: g.financialStatus || 'Online',
     }).select().single();
@@ -1904,7 +2030,49 @@ function renderDashBody(){
     </div>`;
 }
 
-loadAll();
+// ================= AUTH ================
+async function doLogin(){
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  const btn = document.getElementById('loginBtn');
+  const errEl = document.getElementById('loginError');
+  errEl.textContent = '';
+  if(!email || !password){ errEl.textContent = 'Enter both email and password.'; return; }
+  btn.disabled = true; btn.textContent = 'Logging in…';
+  const {error} = await sb.auth.signInWithPassword({email, password});
+  btn.disabled = false; btn.textContent = 'Log in';
+  if(error){ errEl.textContent = error.message; return; }
+  await showApp();
+}
+async function doLogout(){
+  await sb.auth.signOut();
+  window.location.reload();
+}
+async function showApp(){
+  document.getElementById('loginScreen').classList.remove('show');
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('appShell').style.display = 'flex';
+  document.getElementById('mobileTabs').style.display = '';
+  await loadAll();
+}
+async function initAuth(){
+  const {data: {session}} = await sb.auth.getSession();
+  if(session){
+    await showApp();
+  }else{
+    document.getElementById('loginScreen').classList.add('show');
+    document.getElementById('loginScreen').style.display = 'flex';
+  }
+}
+sb.auth.onAuthStateChange((event) => {
+  if(event === 'SIGNED_OUT'){
+    document.getElementById('appShell').style.display = 'none';
+    document.getElementById('mobileTabs').style.display = 'none';
+    document.getElementById('loginScreen').style.display = 'flex';
+  }
+});
+
+initAuth();
 </script>
 </body>
 </html>
