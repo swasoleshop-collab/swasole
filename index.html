@@ -141,7 +141,7 @@ const NAV = [
 
 let state = { categories:[], products:[], customers:[], sales:[], saleItems:[], team:[], company:null, wholesaleAccounts:[], wholesaleOrders:[], wholesaleOrderItems:[], route:'dashboard', loaded:false, connError:null };
 const inr = (n) => '₹' + (Math.round((n||0)*100)/100).toLocaleString('en-IN',{minimumFractionDigits:0,maximumFractionDigits:2});
-const APP_VERSION = '2026.10.06-d';
+const APP_VERSION = '2026.10.06-e';
 const EXTRA_COLS = {
   products: ['hsn_code','mrp'], sale_items: ['hsn_code','mrp'], customers: ['gstin'],
   sales: ['buyer_gstin','place_of_supply','notes'], company_settings: ['default_hsn','bank_details','terms'],
@@ -1096,6 +1096,10 @@ function renderCompany(main){
     <button class="gold" id="saveCoBtn" onclick="saveCompany()">Save company details</button>
     <p class="role-note" style="margin-top:10px;">App version ${APP_VERSION}</p>
     <div class="hairline"></div>
+    <div class="section-title">HSN code</div>
+    <p class="role-note" style="margin-bottom:14px;">Put the same HSN code on every product and every bill line in one go, and use it as the default for new products. You can still change it on any single product (Products &rarr; Edit) or any single bill (Edit bill).</p>
+    <div style="display:flex;gap:8px;max-width:380px;"><input id="bulkHsn" value="7117"><button class="secondary" id="applyHsnBtn" onclick="applyHsnToAll()">Apply to all</button></div>
+    <div class="hairline"></div>
     <div class="section-title">Bills</div>
     <p class="role-note" style="margin-bottom:14px;">New bills show GST on the price with an equal discount, so the total never changes. Use this once to bring bills made earlier (including imported ones) to the same layout. Bill totals stay exactly as they are.</p>
     <button class="secondary" id="tidyGstBtn" onclick="tidyGstOnExistingBills()">Update GST layout on existing bills</button>
@@ -1176,6 +1180,32 @@ async function downloadFullBackup(){
     alert('Backup failed: '+e.message);
   }
   btn.disabled = false; btn.textContent = 'Download full data backup';
+}
+async function applyHsnToAll(){
+  if(!extrasAvailable){ alert('Please run swasole-migration-6-billing.sql in Supabase first. HSN codes cannot be saved until that is done.'); return; }
+  const code = document.getElementById('bulkHsn').value.trim();
+  if(!code){ alert('Enter an HSN code first.'); return; }
+  const prods = state.products.filter(p => (p.hsn_code||'') !== code);
+  const lines = state.saleItems.filter(i => (i.hsn_code||'') !== code);
+  if(!confirm(`Set HSN ${code} on:\n\n• ${prods.length} of ${state.products.length} products\n• ${lines.length} bill lines on existing bills\n• and as the default for new products\n\nBill totals and tax amounts do not change. Continue?`)) return;
+  const btn = document.getElementById('applyHsnBtn'); btn.disabled = true; btn.textContent = 'Updating…';
+  let failed = 0;
+  const {error: ce} = await sb.from('company_settings').update({default_hsn: code}).eq('id', 1);
+  if(ce) failed++;
+  const chunk = (arr, n) => { const out = []; for(let i=0;i<arr.length;i+=n) out.push(arr.slice(i,i+n)); return out; };
+  for(const part of chunk(prods.map(p=>p.product_id), 50)){
+    btn.textContent = 'Updating products…';
+    const {error} = await sb.from('products').update({hsn_code: code}).in('product_id', part);
+    if(error) failed++;
+  }
+  for(const part of chunk(lines.map(i=>i.sale_item_id), 50)){
+    btn.textContent = 'Updating bills…';
+    const {error} = await sb.from('sale_items').update({hsn_code: code}).in('sale_item_id', part);
+    if(error) failed++;
+  }
+  await loadAll();
+  nav('company');
+  alert(failed ? 'Some updates failed, please try again.' : `Done. HSN ${code} is now on ${prods.length} products and ${lines.length} bill lines.`);
 }
 async function saveCompany(){
   const btn = document.getElementById('saveCoBtn');
