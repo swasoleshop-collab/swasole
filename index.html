@@ -36,7 +36,7 @@ button.gold{background:var(--gold);border-color:var(--gold);color:#fff;}
 button.small{padding:5px 11px;font-size:12px;}
 button:disabled{opacity:0.5;cursor:not-allowed;}
 button:hover:not(:disabled){opacity:0.85;}
-input,select{font-family:'Inter',sans-serif;padding:9px 11px;border:1px solid var(--line);background:#fff;color:var(--ink);font-size:13.5px;width:100%;}
+input,select,textarea{font-family:'Inter',sans-serif;padding:9px 11px;border:1px solid var(--line);background:#fff;color:var(--ink);font-size:13.5px;width:100%;}
 label{display:block;font-size:11.5px;color:var(--ink-soft);margin-bottom:5px;letter-spacing:0.02em;}
 .field{margin-bottom:14px;}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
@@ -66,7 +66,7 @@ tr:hover td{background:#FCFAF6;}
 .hbar-fill{background:var(--gold);height:100%;}
 .hbar-val{width:80px;text-align:right;font-size:12px;font-variant-numeric:tabular-nums;flex-shrink:0;}
 .empty{color:var(--ink-soft);font-size:13px;padding:30px 0;text-align:center;}
-.pos-grid{display:grid;grid-template-columns:1fr 340px;gap:24px;align-items:start;}
+.pos-grid{display:grid;grid-template-columns:1fr 400px;gap:24px;align-items:start;}
 .cart-line{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--line);font-size:13px;}
 .badge-low{color:var(--rose);}
 .role-note{font-size:12px;color:var(--ink-soft);margin-top:2px;}
@@ -102,6 +102,7 @@ tr:hover td{background:#FCFAF6;}
     <div class="field"><label>Password</label><input id="loginPassword" type="password" autocomplete="current-password"></div>
     <div id="loginError" style="color:var(--rose);font-size:12.5px;margin-bottom:10px;"></div>
     <button class="gold" id="loginBtn" style="width:100%;" onclick="doLogin()">Log in</button>
+    <div id="loginVersion" style="text-align:center;font-size:10px;color:var(--ink-soft);margin-top:14px;"></div>
   </div>
 </div>
 <div class="app" id="appShell" style="display:none;">
@@ -115,7 +116,16 @@ tr:hover td{background:#FCFAF6;}
 // ====== SUPABASE CONNECTION ======
 const SUPABASE_URL = "https://gwsomnnqnzhfeutgvjym.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_0-2EQfzHSbPtAyHUIq4xOg_2VT7_kNv";
-const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const sbRaw = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// If the latest SQL update has not been run yet, the new bill fields are left out of saves instead of making them fail.
+const sb = { auth: sbRaw.auth, from(table){
+  const q = sbRaw.from(table);
+  return new Proxy(q, { get(target, prop){
+    if(prop === 'insert' || prop === 'update') return (payload, ...rest) => target[prop](stripExtras(table, payload), ...rest);
+    const v = target[prop];
+    return typeof v === 'function' ? v.bind(target) : v;
+  }});
+}};
 
 const NAV = [
   {id:'dashboard', label:'Dashboard'},
@@ -131,6 +141,54 @@ const NAV = [
 
 let state = { categories:[], products:[], customers:[], sales:[], saleItems:[], team:[], company:null, wholesaleAccounts:[], wholesaleOrders:[], wholesaleOrderItems:[], route:'dashboard', loaded:false, connError:null };
 const inr = (n) => '₹' + (Math.round((n||0)*100)/100).toLocaleString('en-IN',{minimumFractionDigits:0,maximumFractionDigits:2});
+const APP_VERSION = '2026.10.06-d';
+const EXTRA_COLS = {
+  products: ['hsn_code','mrp'], sale_items: ['hsn_code','mrp'], customers: ['gstin'],
+  sales: ['buyer_gstin','place_of_supply','notes'], company_settings: ['default_hsn','bank_details','terms'],
+};
+let extrasAvailable = true;
+function stripExtras(table, payload){
+  if(extrasAvailable || !EXTRA_COLS[table]) return payload;
+  const strip = (o) => { const copy = {...o}; EXTRA_COLS[table].forEach(k => delete copy[k]); return copy; };
+  return Array.isArray(payload) ? payload.map(strip) : strip(payload);
+}
+const INDIAN_STATES = {'01':'Jammu & Kashmir','02':'Himachal Pradesh','03':'Punjab','04':'Chandigarh','05':'Uttarakhand','06':'Haryana','07':'Delhi','08':'Rajasthan','09':'Uttar Pradesh','10':'Bihar','11':'Sikkim','12':'Arunachal Pradesh','13':'Nagaland','14':'Manipur','15':'Mizoram','16':'Tripura','17':'Meghalaya','18':'Assam','19':'West Bengal','20':'Jharkhand','21':'Odisha','22':'Chhattisgarh','23':'Madhya Pradesh','24':'Gujarat','26':'Dadra & Nagar Haveli and Daman & Diu','27':'Maharashtra','29':'Karnataka','30':'Goa','31':'Lakshadweep','32':'Kerala','33':'Tamil Nadu','34':'Puducherry','35':'Andaman & Nicobar Islands','36':'Telangana','37':'Andhra Pradesh','38':'Ladakh'};
+function stateLabelFromGstin(g){ const code = String(g||'').trim().slice(0,2); return INDIAN_STATES[code] ? `${INDIAN_STATES[code]} (${code})` : ''; }
+function companyStateLabel(){ return stateLabelFromGstin(state.company && state.company.gstin); }
+function hsnFor(p){ return (p && p.hsn_code) || (state.company && state.company.default_hsn) || ''; }
+function mrpFor(p){ return p && Number(p.mrp) > 0 ? Number(p.mrp) : Number(p && p.selling_price) || 0; }
+function localDateStr(d){ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+function rupeesInWords(amount){
+  const n = Math.round((Number(amount)||0)*100)/100;
+  const rupees = Math.floor(n), paise = Math.round((n - rupees)*100);
+  const ones = ['','One','Two','Three','Four','Five','Six','Seven','Eight','Nine','Ten','Eleven','Twelve','Thirteen','Fourteen','Fifteen','Sixteen','Seventeen','Eighteen','Nineteen'];
+  const tens = ['','','Twenty','Thirty','Forty','Fifty','Sixty','Seventy','Eighty','Ninety'];
+  const two = (x) => x < 20 ? ones[x] : tens[Math.floor(x/10)] + (x%10 ? ' ' + ones[x%10] : '');
+  const three = (x) => (x >= 100 ? ones[Math.floor(x/100)] + ' Hundred' + (x%100 ? ' ' : '') : '') + (x%100 ? two(x%100) : '');
+  let x = rupees; const parts = [];
+  const crore = Math.floor(x/10000000); x %= 10000000;
+  const lakh = Math.floor(x/100000); x %= 100000;
+  const thousand = Math.floor(x/1000); x %= 1000;
+  if(crore) parts.push(three(crore) + ' Crore');
+  if(lakh) parts.push(two(lakh) + ' Lakh');
+  if(thousand) parts.push(two(thousand) + ' Thousand');
+  if(x) parts.push(three(x));
+  const words = parts.length ? parts.join(' ') : 'Zero';
+  return 'Rupees ' + words + (paise ? ' and ' + two(paise) + ' Paise' : '') + ' Only';
+}
+// next bill number in the same style as the latest numbered bill (e.g. after SW207 comes SW208)
+function suggestNextBillNumber(){
+  let best = null;
+  for(const s of state.sales){
+    const num = String(s.invoice_number||'').trim();
+    const m = num.match(/^([A-Za-z]+)([-\s]?)(\d{1,6})$/);
+    if(!m || /^(INV|WS|OFF)$/i.test(m[1])) continue;
+    const t = new Date(s.sale_date||0).getTime() || 0;
+    if(!best || t > best.t || (t === best.t && +m[3] > best.n)) best = {t, prefix:m[1], sep:m[2], n:+m[3], width:m[3].length};
+  }
+  if(!best) return 'SW001';
+  return best.prefix + best.sep + String(best.n + 1).padStart(best.width, '0');
+}
 const inr2 = (n) => '₹' + (Number(n)||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
 // GST is shown ON TOP of the price paid, then cancelled by an equal "GST discount", so the total never changes.
 // taxable value = the amount the customer pays (after any real discount); tax = rate x that amount.
@@ -167,6 +225,8 @@ function billTotalsHtml(b){ // b: {subtotal, discount, taxable, cgst, sgst, igst
 // ====== DATA LOAD ======
 async function loadAll(){
   try{
+    const probe = await sb.from('products').select('hsn_code').limit(1);
+    extrasAvailable = !probe.error;
     const [cats, prods, custs, sales, saleItems, team, company, wsAccounts, wsOrders, wsItems] = await Promise.all([
       sb.from('categories').select('*').order('name'),
       sb.from('products').select('*, product_images(image_url, is_primary)').order('created_at', {ascending:false}),
@@ -214,6 +274,7 @@ function render(){
       <p class="role-note">Check that the tables exist and the Row Level Security policies allow access, then reload this page.</p>`;
     return;
   }
+  if(!extrasAvailable) main.insertAdjacentHTML('afterbegin', `<div class="statusbar err">A database update is waiting: run <strong>swasole-migration-6-billing.sql</strong> in Supabase to turn on HSN codes, MRP, GSTIN and the other new bill fields. Everything else keeps working meanwhile.</div>`);
   if(state.route === 'dashboard') renderDashboard(main);
   else if(state.route === 'pos') renderPOS(main);
   else if(state.route === 'orders') renderOrders(main);
@@ -228,7 +289,7 @@ function render(){
 function renderSidebar(){
   document.getElementById('sidebar').innerHTML = `<div class="brand">Swasole</div>` +
     NAV.map(n => `<div class="navitem ${state.route===n.id?'active':''}" onclick="nav('${n.id}')">${n.label}</div>`).join('') +
-    `<div class="navitem" style="margin-top:auto;color:var(--rose);" onclick="doLogout()">Log out</div>`;
+    `<div class="navitem" style="margin-top:auto;color:var(--rose);" onclick="doLogout()">Log out</div><div style="padding:6px 24px 0;font-size:10px;color:var(--ink-soft);">Version ${APP_VERSION}</div>`;
 }
 function renderMobileTabs(){
   document.getElementById('mobileTabs').innerHTML = NAV.map(n => `<div class="navitem ${state.route===n.id?'active':''}" onclick="nav('${n.id}')">${n.label}</div>`).join('');
@@ -451,6 +512,7 @@ function buildImportRows(csvRows){
       price,
       stock: isNaN(qty) ? 0 : qty,
       image: lastImage || null,
+      mrp: parseFloat(row['Variant Compare At Price']) || null,
     });
   }
   return out;
@@ -494,6 +556,7 @@ async function runImport(){
       stock_qty: row.stock,
       low_stock_threshold: 2,
       listed_on_shopify: true,
+      mrp: row.mrp,
     }).select().single();
     if(!prodErr && row.image){
       await sb.from('product_images').insert({product_id: product.product_id, image_url: row.image, is_primary: true});
@@ -534,6 +597,10 @@ function openProductModal(id){
       <div class="field"><label>Low-stock alert threshold</label><input id="f_lowstock" type="number" value="${existing?existing.low_stock_threshold:2}"></div>
       <div class="field"><label>Listing</label><select id="f_listed"><option value="false" ${existing&&!existing.listed_on_shopify?'selected':''}>Offline (not on Shopify)</option><option value="true" ${existing&&existing.listed_on_shopify?'selected':''}>Online (on Shopify)</option></select></div>
       <div class="field"><label>Status</label><select id="f_status"><option value="active" ${existing&&existing.status==='active'?'selected':''}>Active</option><option value="draft" ${existing&&existing.status==='draft'?'selected':''}>Draft</option><option value="archived" ${existing&&existing.status==='archived'?'selected':''}>Archived</option></select></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>HSN code <span class="role-note">(printed on bills)</span></label><input id="f_hsn" value="${esc(existing?existing.hsn_code||'':'')}"></div>
+      <div class="field"><label>MRP (₹) <span class="role-note">(blank = same as selling price)</span></label><input id="f_mrp" type="number" step="0.01" value="${existing&&existing.mrp?existing.mrp:''}"></div>
     </div>
     <div class="hairline"></div>
     <div id="pricingPreview" style="font-size:13px;color:var(--ink-soft);margin-bottom:16px;"></div>
@@ -596,6 +663,8 @@ async function saveProduct(id){
     low_stock_threshold: parseFloat(document.getElementById('f_lowstock').value)||2,
     listed_on_shopify: document.getElementById('f_listed').value === 'true',
     status: document.getElementById('f_status').value,
+    hsn_code: document.getElementById('f_hsn').value.trim() || null,
+    mrp: parseFloat(document.getElementById('f_mrp').value) || null,
   };
   let productId = id;
   let error, updatedProduct;
@@ -636,13 +705,13 @@ function renderBulkEdit(main){
     <div class="topbar"><h1>Bulk edit products</h1><div style="display:flex;gap:10px;"><button class="secondary" onclick="openAutoEstimateModal()">Auto-estimate purchase price</button><button class="secondary" onclick="nav('products')">Back to products</button></div></div>
     <p class="role-note" style="margin-bottom:16px;">Edit SKU, name, category, stock, and cost for many products at once. <strong>Selling price stays exactly as it is</strong> unless you deliberately change it — margin % is calculated automatically.</p>
     <table>
-      <thead><tr><th>SKU</th><th>Name</th><th>Category</th><th class="num">Stock</th><th class="num">Purchase / Landing (₹)</th><th class="num">Selling price (₹)</th><th class="num">Margin % (auto)</th><th class="num">GST %</th></tr></thead>
+      <thead><tr><th>SKU</th><th>Name</th><th>Category</th><th class="num">Stock</th><th class="num">Purchase / Landing (₹)</th><th class="num">Selling price (₹)</th><th class="num">Margin % (auto)</th><th class="num">GST %</th><th>HSN</th><th class="num">MRP (₹)</th></tr></thead>
       <tbody id="bulkRows"></tbody>
     </table>
     <button class="gold" id="bulkSaveBtn" style="margin-top:18px;" onclick="saveBulkEdits()">Save all changes</button>
   `;
   const rows = document.getElementById('bulkRows');
-  if(state.products.length===0){ rows.innerHTML = `<tr><td colspan="8"><div class="empty">No products yet.</div></td></tr>`; return; }
+  if(state.products.length===0){ rows.innerHTML = `<tr><td colspan="10"><div class="empty">No products yet.</div></td></tr>`; return; }
   rows.innerHTML = state.products.map(p => `
     <tr data-id="${p.product_id}">
       <td><input value="${p.sku}" style="width:90px;" oninput="bulkFieldChange('${p.product_id}','sku',this.value,true)"></td>
@@ -653,6 +722,8 @@ function renderBulkEdit(main){
       <td><input type="number" value="${p.selling_price}" style="width:100px;" oninput="bulkFieldChange('${p.product_id}','selling_price',this.value)"></td>
       <td class="num" id="margin_${p.product_id}">${p.purchase_price>0 ? (((p.selling_price/p.purchase_price)-1)*100).toFixed(1) : '0.0'}%</td>
       <td><input type="number" value="${p.gst_rate}" style="width:60px;" oninput="bulkFieldChange('${p.product_id}','gst_rate',this.value,true)"></td>
+      <td><input value="${esc(p.hsn_code||'')}" style="width:90px;" oninput="bulkFieldChange('${p.product_id}','hsn_code',this.value,true)"></td>
+      <td><input type="number" step="0.01" value="${p.mrp||''}" placeholder="${p.selling_price}" style="width:90px;" oninput="bulkFieldChange('${p.product_id}','mrp',this.value,true)"></td>
     </tr>`).join('');
 }
 function bulkFieldChange(productId, field, value, isRaw){
@@ -681,6 +752,8 @@ async function saveBulkEdits(){
     if(changes.category_id !== undefined) updateData.category_id = changes.category_id;
     if(changes.stock_qty !== undefined) updateData.stock_qty = changes.stock_qty;
     if(changes.gst_rate !== undefined) updateData.gst_rate = changes.gst_rate;
+    if(changes.hsn_code !== undefined) updateData.hsn_code = String(changes.hsn_code).trim() || null;
+    if(changes.mrp !== undefined) updateData.mrp = parseFloat(changes.mrp) || null;
     if(changes.purchase_price !== undefined || changes.selling_price !== undefined){
       const purchase = changes.purchase_price ?? p.purchase_price;
       const targetSelling = changes.selling_price ?? p.selling_price;
@@ -783,7 +856,10 @@ function openCustomerModal(id){
       <div class="field"><label>Phone</label><input id="c_phone" value="${esc(c?c.phone||'':'')}"></div>
       <div class="field"><label>Email</label><input id="c_email" value="${esc(c?c.email||'':'')}"></div>
     </div>
-    <div class="field"><label>City</label><input id="c_city" value="${esc(c?c.city||'':'')}"></div>
+    <div class="grid2">
+      <div class="field"><label>City</label><input id="c_city" value="${esc(c?c.city||'':'')}"></div>
+      <div class="field"><label>GSTIN <span class="role-note">(if a business)</span></label><input id="c_gstin" value="${esc(c?c.gstin||'':'')}"></div>
+    </div>
     <div class="field"><label>Address</label><input id="c_address" value="${esc(c?c.address||'':'')}"></div>
     <div style="display:flex;justify-content:space-between;gap:8px;margin-top:6px;">
       ${c ? `<button class="secondary" onclick="deleteCustomer('${c.customer_id}')">Delete</button>` : '<span></span>'}
@@ -797,7 +873,8 @@ async function saveCustomer(id){
   const name = document.getElementById('c_name').value.trim();
   if(!name){ alert('Name required'); return; }
   const data = {name, phone:document.getElementById('c_phone').value.trim(), email:document.getElementById('c_email').value.trim(),
-    city:document.getElementById('c_city').value.trim(), address:document.getElementById('c_address').value.trim()};
+    city:document.getElementById('c_city').value.trim(), address:document.getElementById('c_address').value.trim(),
+    gstin:document.getElementById('c_gstin').value.trim().toUpperCase()};
   const {error} = id ? await sb.from('customers').update(data).eq('customer_id', id) : await sb.from('customers').insert(data);
   if(error){ alert(error.message); return; }
   closeModal(); await loadAll();
@@ -1009,8 +1086,15 @@ function renderCompany(main){
       <div class="field"><label>Phone</label><input id="co_phone" value="${c.phone||''}"></div>
       <div class="field"><label>Email</label><input id="co_email" value="${c.email||''}"></div>
     </div>
-    <div class="field"><label>GSTIN</label><input id="co_gstin" value="${c.gstin||''}" placeholder="e.g. 09ABCDE1234F1Z5"></div>
+    <div class="grid2">
+      <div class="field"><label>GSTIN</label><input id="co_gstin" value="${esc(c.gstin||'')}" placeholder="e.g. 09ABCDE1234F1Z5"></div>
+      <div class="field"><label>Default HSN code <span class="role-note">(for products without their own)</span></label><input id="co_hsn" value="${esc(c.default_hsn||'')}"></div>
+    </div>
+    <p class="role-note" style="margin:-6px 0 14px;">State on bills is taken from the first two digits of your GSTIN${companyStateLabel() ? ' — currently ' + esc(companyStateLabel()) : ''}.</p>
+    <div class="field"><label>Bank details <span class="role-note">(printed at the bottom of bills)</span></label><textarea id="co_bank" rows="3" placeholder="Account name, bank, account number, IFSC, UPI id">${esc(c.bank_details||'')}</textarea></div>
+    <div class="field"><label>Terms &amp; conditions <span class="role-note">(printed at the bottom of bills)</span></label><textarea id="co_terms" rows="3" placeholder="e.g. Goods once sold will not be taken back. Subject to Delhi jurisdiction.">${esc(c.terms||'')}</textarea></div>
     <button class="gold" id="saveCoBtn" onclick="saveCompany()">Save company details</button>
+    <p class="role-note" style="margin-top:10px;">App version ${APP_VERSION}</p>
     <div class="hairline"></div>
     <div class="section-title">Bills</div>
     <p class="role-note" style="margin-bottom:14px;">New bills show GST on the price with an equal discount, so the total never changes. Use this once to bring bills made earlier (including imported ones) to the same layout. Bill totals stay exactly as they are.</p>
@@ -1101,7 +1185,10 @@ async function saveCompany(){
     address: document.getElementById('co_address').value,
     phone: document.getElementById('co_phone').value,
     email: document.getElementById('co_email').value,
-    gstin: document.getElementById('co_gstin').value,
+    gstin: document.getElementById('co_gstin').value.trim(),
+    default_hsn: document.getElementById('co_hsn').value.trim(),
+    bank_details: document.getElementById('co_bank').value.trim(),
+    terms: document.getElementById('co_terms').value.trim(),
   };
   const {error} = await sb.from('company_settings').update(data).eq('id', 1);
   if(error){ alert('Could not save: '+error.message); btn.disabled=false; btn.textContent='Save company details'; return; }
@@ -1278,7 +1365,7 @@ async function fulfillWholesaleOrder(orderId){
   if(saleErr){ alert('Could not create bill: '+saleErr.message); return; }
   const saleItemsData = items.map(i=>{
     const p = state.products.find(p=>p.product_id===i.product_id);
-    return {sale_id: sale.sale_id, product_id: i.product_id, item_name: p?p.name:'Product', quantity: i.quantity, unit_price: i.wholesale_unit_price, landing_price_snapshot: p?p.landing_price:0, line_total: i.quantity*i.wholesale_unit_price};
+    return {sale_id: sale.sale_id, product_id: i.product_id, item_name: p?p.name:'Product', quantity: i.quantity, unit_price: i.wholesale_unit_price, landing_price_snapshot: p?p.landing_price:0, line_total: i.quantity*i.wholesale_unit_price, hsn_code: p ? (hsnFor(p) || null) : null, mrp: p ? (mrpFor(p) || null) : null};
   });
   await sb.from('sale_items').insert(saleItemsData);
   const invTxns = items.map(i=>({product_id: i.product_id, type:'sale_out', quantity: -i.quantity, reference_id: sale.sale_id, channel:'wholesale'}));
@@ -1306,25 +1393,34 @@ function renderPOS(main){
       </div>
       <div>
         <div class="section-title">Current bill</div>
+        <div class="grid2">
+          <div class="field"><label>Bill number</label><input id="posInvoice" value="${esc(suggestNextBillNumber())}"></div>
+          <div class="field"><label>Date</label><input id="posDate" type="date" value="${localDateStr(new Date())}"></div>
+        </div>
         <div id="cartLines"></div>
         <div class="section-title" style="margin-top:16px;">Customer (optional)</div>
         <div class="field"><label>Name</label><input id="posCustName" list="custNames" oninput="posCustAutofill()" placeholder="Walk-in customer"></div>
-        <datalist id="custNames">${state.customers.map(c=>`<option value="${c.name}">`).join('')}</datalist>
+        <datalist id="custNames">${state.customers.map(c=>`<option value="${esc(c.name)}">`).join('')}</datalist>
         <div class="grid2">
           <div class="field"><label>Phone</label><input id="posCustPhone" type="tel"></div>
-          <div class="field"><label>Address</label><input id="posCustAddress"></div>
+          <div class="field"><label>Customer GSTIN <span class="role-note">(optional)</span></label><input id="posCustGstin" oninput="posGstinChange()"></div>
+        </div>
+        <div class="field"><label>Address</label><input id="posCustAddress"></div>
+        <div class="grid2">
+          <div class="field"><label>Place of supply</label><input id="posPlace" value="${esc(companyStateLabel())}"></div>
+          <div class="field"><label>Sale type</label><select id="posStateType" onchange="renderCartTotals()"><option value="intra-state">Intra-state</option><option value="inter-state">Inter-state</option></select></div>
         </div>
         <div class="grid2">
           <div class="field"><label>Discount (₹)</label><input id="posDiscount" type="number" value="0" oninput="renderCartTotals()"></div>
-          <div class="field"><label>Sale type</label><select id="posStateType" onchange="renderCartTotals()"><option value="intra-state">Intra-state</option><option value="inter-state">Inter-state</option></select></div>
+          <div class="field"><label>Payment method</label><select id="posPayment"><option>Cash</option><option>Card</option><option>UPI</option></select></div>
         </div>
-        <div class="field"><label>Payment method</label><select id="posPayment"><option>Cash</option><option>Card</option><option>UPI</option></select></div>
+        <div class="field"><label>Notes <span class="role-note">(optional, printed on the bill)</span></label><input id="posNotes"></div>
         <div class="hairline"></div>
         <div id="cartTotals"></div>
         <button class="gold" id="completeSaleBtn" style="width:100%;margin-top:14px;" onclick="completeSale()">Complete sale</button>
       </div>
     </div>`;
-  renderPosProductList(); renderCartTotals();
+  renderCartLines(); renderPosProductList(); renderCartTotals();
 }
 function posCustAutofill(){
   const name = document.getElementById('posCustName').value;
@@ -1332,6 +1428,19 @@ function posCustAutofill(){
   if(match){
     document.getElementById('posCustPhone').value = match.phone || '';
     document.getElementById('posCustAddress').value = match.address || '';
+    document.getElementById('posCustGstin').value = match.gstin || '';
+    posGstinChange();
+  }
+}
+function posGstinChange(){
+  const g = document.getElementById('posCustGstin').value.trim().toUpperCase();
+  const label = stateLabelFromGstin(g);
+  if(!label) return;
+  document.getElementById('posPlace').value = label;
+  const mine = String((state.company && state.company.gstin) || '').trim().slice(0,2);
+  if(INDIAN_STATES[mine]){
+    document.getElementById('posStateType').value = g.slice(0,2) === mine ? 'intra-state' : 'inter-state';
+    renderCartTotals();
   }
 }
 function renderPosProductList(){
@@ -1342,7 +1451,8 @@ function renderPosProductList(){
   if(list.length===0){ el.innerHTML = `<div class="empty">No products match.</div>`; return; }
   el.innerHTML = list.map(p=>`
     <div class="cart-line" style="cursor:pointer;" onclick="addToCart('${p.product_id}')">
-      <span>${p.name} <span class="tag">${p.sku}</span> ${p.stock_qty<=0?'<span class="badge-low">out of stock</span>':''}</span>
+      <span>${esc(p.name)} <span class="tag">${esc(p.sku)}</span> ${p.stock_qty<=0?'<span class="badge-low">out of stock</span>':''}<br>
+        <span class="role-note" style="font-size:11px;">${hsnFor(p) ? 'HSN ' + esc(hsnFor(p)) + ' · ' : ''}MRP ${inr(mrpFor(p))}</span></span>
       <span class="num">${inr(p.selling_price)}</span>
     </div>`).join('');
 }
@@ -1350,32 +1460,38 @@ function addToCart(productId){
   const p = state.products.find(p=>p.product_id===productId);
   if(p.stock_qty<=0){ alert('Out of stock'); return; }
   const line = cart.find(l=>l.productId===productId);
-  if(line) line.qty += 1; else cart.push({productId, qty:1});
+  if(line) line.qty += 1; else cart.push({productId, qty:1, rate: Number(p.selling_price)||0});
   renderCartLines(); renderCartTotals();
 }
 function renderCartLines(){
   const el = document.getElementById('cartLines');
+  if(!el) return;
   if(cart.length===0){ el.innerHTML = `<div class="empty">Cart is empty.</div>`; return; }
   el.innerHTML = cart.map((l,i)=>{
     const p = state.products.find(p=>p.product_id===l.productId);
-    return `<div class="cart-line">
-      <span>${p.name} × <input type="number" min="1" value="${l.qty}" style="width:48px;padding:2px 4px;" onchange="updateQty(${i}, this.value)"></span>
-      <span class="num">${inr(p.selling_price*l.qty)} <button class="small secondary" style="margin-left:6px;" onclick="removeLine(${i})">×</button></span>
+    return `<div style="padding:10px 0;border-bottom:1px solid var(--line);">
+      <div style="display:flex;justify-content:space-between;gap:8px;"><strong style="font-size:13px;">${esc(p.name)}</strong><button class="small secondary" onclick="removeLine(${i})">×</button></div>
+      <div class="role-note" style="font-size:11px;margin:2px 0 6px;">${esc(p.sku)}${hsnFor(p) ? ' · HSN ' + esc(hsnFor(p)) : ''} · MRP ${inr(mrpFor(p))}</div>
+      <div style="display:flex;align-items:center;gap:6px;font-size:12.5px;">
+        Qty <input type="number" min="1" value="${l.qty}" style="width:56px;padding:4px 6px;" onchange="updateQty(${i}, this.value)">
+        × Rate <input type="number" step="0.01" min="0" value="${l.rate}" style="width:84px;padding:4px 6px;" onchange="updateRate(${i}, this.value)">
+        <span class="num" style="margin-left:auto;font-weight:600;">${inr2(l.qty*l.rate)}</span>
+      </div>
     </div>`;
   }).join('');
 }
 function updateQty(i, val){ cart[i].qty = Math.max(1, parseInt(val)||1); renderCartLines(); renderCartTotals(); }
+function updateRate(i, val){ cart[i].rate = Math.max(0, parseFloat(val)||0); renderCartLines(); renderCartTotals(); }
 function removeLine(i){ cart.splice(i,1); renderCartLines(); renderCartTotals(); }
 function computeTotals(){
-  const subtotal = cart.reduce((a,l)=>{ const p = state.products.find(p=>p.product_id===l.productId); return a + p.selling_price*l.qty; },0);
+  const subtotal = cart.reduce((a,l)=> a + l.rate*l.qty, 0);
   const discount = parseFloat(document.getElementById('posDiscount')?.value)||0;
   const finalAmount = Math.max(0, subtotal - discount);
   let gstWeighted = 0;
-  cart.forEach(l=>{ const p = state.products.find(p=>p.product_id===l.productId); gstWeighted += (p.gst_rate * p.selling_price*l.qty); });
+  cart.forEach(l=>{ const p = state.products.find(p=>p.product_id===l.productId); gstWeighted += (Number(p.gst_rate) * l.rate*l.qty); });
   const avgGst = subtotal>0 ? gstWeighted/subtotal : 0;
-  const stateTypeNow = document.getElementById('posStateType')?.value || 'intra-state';
-  const g = computeGst(finalAmount, avgGst, stateTypeNow);
   const stateType = document.getElementById('posStateType')?.value || 'intra-state';
+  const g = computeGst(finalAmount, avgGst, stateType);
   return {subtotal, discount, finalAmount, taxable: g.taxable, cgst: g.cgst, sgst: g.sgst, igst: g.igst, stateType, ratePct: avgGst};
 }
 function renderCartTotals(){
@@ -1387,6 +1503,11 @@ function renderCartTotals(){
 }
 async function completeSale(){
   if(cart.length===0){ alert('Cart is empty'); return; }
+  const invoiceNo = document.getElementById('posInvoice').value.trim();
+  if(!invoiceNo){ alert('Please enter a bill number.'); return; }
+  if(state.sales.some(s => String(s.invoice_number||'').toUpperCase() === invoiceNo.toUpperCase())){ alert('That bill number is already used. Please pick another one.'); return; }
+  const dateStr = document.getElementById('posDate').value;
+  if(!dateStr){ alert('Please pick a date.'); return; }
   const btn = document.getElementById('completeSaleBtn');
   btn.disabled = true; btn.textContent = 'Saving…';
 
@@ -1394,33 +1515,42 @@ async function completeSale(){
   const custName = document.getElementById('posCustName').value.trim();
   const custPhone = document.getElementById('posCustPhone').value.trim();
   const custAddress = document.getElementById('posCustAddress').value.trim();
+  const custGstin = document.getElementById('posCustGstin').value.trim().toUpperCase();
   let customerId = null;
   if(custName){
     let existing = custPhone ? state.customers.find(c=>c.phone===custPhone) : state.customers.find(c=>c.name.toLowerCase()===custName.toLowerCase());
     if(existing){
       customerId = existing.customer_id;
-      await sb.from('customers').update({name:custName, phone:custPhone||existing.phone, address:custAddress||existing.address}).eq('customer_id', customerId);
+      const patch = {name:custName, phone:custPhone||existing.phone, address:custAddress||existing.address};
+      if(custGstin) patch.gstin = custGstin;
+      await sb.from('customers').update(patch).eq('customer_id', customerId);
     }else{
-      const {data: newCust, error: custErr} = await sb.from('customers').insert({name:custName, phone:custPhone, address:custAddress}).select().single();
+      const {data: newCust, error: custErr} = await sb.from('customers').insert({name:custName, phone:custPhone, address:custAddress, gstin:custGstin}).select().single();
       if(!custErr) customerId = newCust.customer_id;
     }
   }
 
   const t = computeTotals();
+  const today = localDateStr(new Date());
+  const saleDate = dateStr === today ? new Date().toISOString() : new Date(+dateStr.slice(0,4), +dateStr.slice(5,7)-1, +dateStr.slice(8,10), 12).toISOString();
   const saleRow = {
-    invoice_number: 'INV-' + Date.now().toString().slice(-8),
+    invoice_number: invoiceNo,
     customer_id: customerId,
     channel: 'store',
+    sale_date: saleDate,
     subtotal_before_discount: t.subtotal, discount_value: t.discount, final_amount: t.finalAmount,
     taxable_value: t.taxable, cgst_amount: t.cgst, sgst_amount: t.sgst, igst_amount: t.igst,
     state_type: t.stateType, payment_method: document.getElementById('posPayment').value,
+    buyer_gstin: custGstin || null, place_of_supply: document.getElementById('posPlace').value.trim() || null,
+    notes: document.getElementById('posNotes').value.trim() || null,
   };
   const {data: sale, error: saleErr} = await sb.from('sales').insert(saleRow).select().single();
   if(saleErr){ alert('Could not save sale: '+saleErr.message); btn.disabled=false; btn.textContent='Complete sale'; return; }
 
   const items = cart.map(l=>{
     const p = state.products.find(p=>p.product_id===l.productId);
-    return {sale_id: sale.sale_id, product_id: p.product_id, item_name: p.name, quantity: l.qty, unit_price: p.selling_price, landing_price_snapshot: p.landing_price, line_total: p.selling_price*l.qty};
+    return {sale_id: sale.sale_id, product_id: p.product_id, item_name: p.name, quantity: l.qty, unit_price: l.rate,
+      landing_price_snapshot: p.landing_price, line_total: l.rate*l.qty, hsn_code: hsnFor(p) || null, mrp: mrpFor(p) || null};
   });
   const {error: itemsErr} = await sb.from('sale_items').insert(items);
   if(itemsErr){ alert('Sale saved but items failed: '+itemsErr.message); }
@@ -1449,6 +1579,7 @@ function naturalCompare(a, b){
 function renderOrders(main){
   main.innerHTML = `
     <div class="topbar"><h1>Orders</h1><div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><span class="role-note">All bills — view, print, send, or delete</span><button class="secondary" onclick="openOrderImportModal()">Import from Shopify</button><button class="secondary" onclick="openHistoricalSaleModal()">Add past offline sale</button><button class="secondary" onclick="openOfflineImportModal()">Import offline bills (Excel)</button></div></div>
+    ${salesNeedingGstTidy().length ? `<div class="statusbar" style="border-color:var(--gold);color:var(--gold-deep);"><span>${salesNeedingGstTidy().length} older bill${salesNeedingGstTidy().length>1?'s use':' uses'} the previous GST layout.</span><button class="small gold" onclick="tidyGstOnExistingBills()">Update them now</button></div>` : ''}
     <div class="filters">
       <div class="field"><label>Sort by</label>
         <select id="ordersSortSelect" onchange="ordersSortMode=this.value; renderOrders(document.getElementById('main'))">
@@ -1486,36 +1617,52 @@ function openOrderDetail(saleId){
   const cust = state.customers.find(c=>c.customer_id===s.customer_id);
   const co = state.company || {};
   const dateStr = new Date(s.sale_date).toLocaleDateString('en-IN', {day:'2-digit', month:'short', year:'numeric'});
+  const buyerGstin = s.buyer_gstin || (cust && cust.gstin) || '';
+  const rows = items.map(i => {
+    const p = i.product_id ? state.products.find(p=>p.product_id===i.product_id) : null;
+    const mrp = Number(i.mrp) > 0 ? Number(i.mrp) : (p && Number(p.mrp) > 0 ? Number(p.mrp) : null);
+    return {name: (p && p.name) || i.item_name || 'Product', hsn: i.hsn_code || (p && p.hsn_code) || co.default_hsn || '—',
+      mrp, qty: i.quantity, rate: Number(i.unit_price), total: Number(i.line_total)};
+  });
+  const saved = rows.reduce((a,r) => a + (r.mrp && r.mrp > r.rate ? (r.mrp - r.rate) * r.qty : 0), 0);
+  const muted = 'font-size:12px;color:var(--ink-soft);margin:2px 0 0;';
   openModal(`
     <div id="printInvoice">
       <div style="text-align:center;margin-bottom:14px;">
-        <h1 style="font-size:26px;">${co.company_name || 'Swasole'}</h1>
-        ${co.address ? `<p style="font-size:12px;color:var(--ink-soft);margin:4px 0 0;">${co.address}</p>` : ''}
-        <p style="font-size:12px;color:var(--ink-soft);margin:2px 0 0;">${[co.phone, co.email].filter(Boolean).join(' · ')}</p>
-        ${co.gstin ? `<p style="font-size:12px;color:var(--ink-soft);margin:2px 0 0;">GSTIN: ${co.gstin}</p>` : ''}
+        <h1 style="font-size:26px;">${esc(co.company_name || 'Swasole')}</h1>
+        ${co.address ? `<p style="${muted}margin-top:4px;">${esc(co.address)}</p>` : ''}
+        <p style="${muted}">${[co.phone, co.email].filter(Boolean).map(esc).join(' · ')}</p>
+        ${co.gstin ? `<p style="${muted}">GSTIN: ${esc(co.gstin)}${companyStateLabel() ? ' · State: ' + esc(companyStateLabel()) : ''}</p>` : ''}
       </div>
       <div class="hairline"></div>
-      <div style="display:flex;justify-content:space-between;font-size:12px;margin:10px 0;">
-        <div><strong>TAX INVOICE</strong></div>
-        <div>Invoice ${s.invoice_number}<br>${dateStr}</div>
+      <div style="display:flex;justify-content:space-between;gap:12px;font-size:12px;margin:10px 0;">
+        <div><strong>TAX INVOICE</strong><br><span style="color:var(--ink-soft);">Reverse charge: No</span></div>
+        <div style="text-align:right;">Invoice ${esc(s.invoice_number)}<br>${dateStr}${s.place_of_supply ? `<br>Place of supply: ${esc(s.place_of_supply)}` : ''}</div>
       </div>
       <div class="hairline"></div>
       <p style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.04em;margin:10px 0 4px;">Bill to</p>
-      <p style="font-size:13px;margin:0;"><strong>${cust ? cust.name : 'Walk-in customer'}</strong>${cust&&cust.phone?`<br>${cust.phone}`:''}${cust&&cust.address?`<br>${cust.address}`:''}</p>
+      <p style="font-size:13px;margin:0;"><strong>${cust ? esc(cust.name) : 'Walk-in customer'}</strong>${cust&&cust.phone?`<br>${esc(cust.phone)}`:''}${cust&&cust.address?`<br>${esc(cust.address)}`:''}${buyerGstin?`<br>GSTIN: ${esc(buyerGstin)}`:''}</p>
       <table style="margin-top:14px;">
-        <thead><tr><th>Item</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Total</th></tr></thead>
-        <tbody>${items.map(i=>`<tr><td>${(i.product_id && state.products.find(p=>p.product_id===i.product_id)?.name) || i.item_name || 'Product'}</td><td class="num">${i.quantity}</td><td class="num">${inr(i.unit_price)}</td><td class="num">${inr(i.line_total)}</td></tr>`).join('')}</tbody>
+        <thead><tr><th>Item</th><th>HSN</th><th class="num">Qty</th><th class="num">MRP</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead>
+        <tbody>${rows.map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.hsn)}</td><td class="num">${r.qty}</td><td class="num">${r.mrp ? inr(r.mrp) : '—'}</td><td class="num">${inr(r.rate)}</td><td class="num">${inr(r.total)}</td></tr>`).join('')}</tbody>
       </table>
       <div class="hairline"></div>
       ${invoiceTotalsHtml(s)}
-      <p class="role-note" style="margin-top:6px;">Payment: ${s.payment_method || '—'}</p>
-      <p style="text-align:center;font-size:12px;color:var(--ink-soft);margin-top:24px;">Thank you for shopping with ${co.company_name || 'Swasole'}!</p>
+      ${saved > 0.5 ? `<p style="font-size:12px;color:var(--sage);margin:6px 0 0;text-align:right;">You saved ${inr(saved)} on MRP</p>` : ''}
+      <p style="font-size:12px;margin:10px 0 0;"><strong>Amount in words:</strong> ${esc(rupeesInWords(s.final_amount))}</p>
+      <p class="role-note" style="margin-top:6px;">Payment: ${esc(s.payment_method || '—')}${s.notes ? ' · Note: ' + esc(s.notes) : ''}</p>
+      ${co.bank_details ? `<div style="margin-top:14px;font-size:12px;"><strong>Bank details</strong><div style="white-space:pre-line;color:var(--ink-soft);">${esc(co.bank_details)}</div></div>` : ''}
+      ${co.terms ? `<div style="margin-top:10px;font-size:12px;"><strong>Terms &amp; conditions</strong><div style="white-space:pre-line;color:var(--ink-soft);">${esc(co.terms)}</div></div>` : ''}
+      <div style="display:flex;justify-content:flex-end;margin-top:26px;font-size:12px;text-align:center;">
+        <div style="min-width:170px;"><div style="height:34px;border-bottom:1px solid var(--line);"></div>For ${esc(co.company_name || 'Swasole')}<br><span style="color:var(--ink-soft);">Authorised signatory</span></div>
+      </div>
+      <p style="text-align:center;font-size:12px;color:var(--ink-soft);margin-top:18px;">Thank you for shopping with ${esc(co.company_name || 'Swasole')}!</p>
     </div>
     <div class="hairline no-print"></div>
     <div class="no-print field">
       <label>Bill number (edit to match your own numbering)</label>
       <div style="display:flex;gap:8px;">
-        <input id="editInvoiceNum" value="${s.invoice_number}">
+        <input id="editInvoiceNum" value="${esc(s.invoice_number)}">
         <button class="secondary small" onclick="updateInvoiceNumber('${s.sale_id}')">Save number</button>
       </div>
     </div>
@@ -1530,6 +1677,7 @@ function openOrderDetail(saleId){
     </div>
     <div class="no-print" style="text-align:right;margin-top:14px;"><button class="secondary" onclick="closeModal()">Close</button></div>
   `);
+  const m = document.querySelector('#modalRoot .modal'); if(m) m.style.maxWidth = '680px';
 }
 async function updateInvoiceNumber(saleId){
   const newNum = document.getElementById('editInvoiceNum').value.trim();
@@ -1580,7 +1728,8 @@ function openEditBillModal(saleId){
     priorRate: (tax>0.005 && taxable>0) ? Math.round(tax/taxable*10000)/100 : 3,
     lines: state.saleItems.filter(i=>i.sale_id===saleId).map(i => ({
       product_id: i.product_id, item_name: (i.product_id && state.products.find(p=>p.product_id===i.product_id)?.name) || i.item_name || '',
-      qty: Number(i.quantity), unit: Number(i.unit_price), landing: Number(i.landing_price_snapshot)||0 })),
+      qty: Number(i.quantity), unit: Number(i.unit_price), landing: Number(i.landing_price_snapshot)||0,
+      hsn: i.hsn_code || '', mrp: Number(i.mrp) || 0 })),
   };
   openModal(`
     <h2>Edit bill ${esc(s.invoice_number)}</h2>
@@ -1594,6 +1743,10 @@ function openEditBillModal(saleId){
     </div>
     <datalist id="ebCustNames">${state.customers.map(c=>`<option value="${esc(c.name)}">`).join('')}</datalist>
     <div class="field"><label>Address</label><input id="eb_caddr" value="${esc(cust?cust.address||'':'')}"></div>
+    <div class="grid2">
+      <div class="field"><label>Customer GSTIN</label><input id="eb_gstin" value="${esc(s.buyer_gstin || (cust&&cust.gstin) || '')}"></div>
+      <div class="field"><label>Place of supply</label><input id="eb_place" value="${esc(s.place_of_supply||'')}"></div>
+    </div>
     <div class="grid3">
       <div class="field"><label>Sold through</label><select id="eb_channel">${['store','online','wholesale'].map(x=>`<option ${s.channel===x?'selected':''}>${x}</option>`).join('')}</select></div>
       <div class="field"><label>Payment</label><input id="eb_payment" value="${esc(s.payment_method||'')}"></div>
@@ -1601,28 +1754,31 @@ function openEditBillModal(saleId){
     </div>
     <div class="section-title" style="margin-top:8px;">Items</div>
     <datalist id="editProdNames">${state.products.map(p=>`<option value="${esc(p.name)}">`).join('')}${state.products.map(p=>`<option value="${esc(p.sku)}">`).join('')}</datalist>
-    <table><thead><tr><th>Item (name or SKU)</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Total</th><th></th></tr></thead><tbody id="ebLines"></tbody></table>
+    <table><thead><tr><th>Item (name or SKU)</th><th>HSN</th><th class="num">Qty</th><th class="num">MRP</th><th class="num">Rate</th><th class="num">Total</th><th></th></tr></thead><tbody id="ebLines"></tbody></table>
     <button class="small secondary" style="margin-top:8px;" onclick="editBillAdd()">+ Add item</button>
     <div class="grid2" style="margin-top:14px;">
       <div class="field"><label>Discount (₹)</label><input id="eb_discount" type="number" step="0.01" value="${Number(s.discount_value)||0}" oninput="editBillRecalc()"></div>
       <div></div>
     </div>
+    <div class="field"><label>Notes <span class="role-note">(printed on the bill)</span></label><input id="eb_notes" value="${esc(s.notes||'')}"></div>
     <div id="ebTotals" style="margin:6px 0 10px;"></div>
     <p class="role-note">If this bill took items out of your stock (bills made in Billing do), changing quantities updates your stock automatically. Bills that never changed stock, such as imported past bills, leave stock alone.</p>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;">
       <button class="secondary" onclick="openOrderDetail('${saleId}')">Cancel</button>
       <button class="gold" id="ebSaveBtn" onclick="saveEditedBill()">Save changes</button>
     </div>`);
-  const m = document.querySelector('#modalRoot .modal'); if(m) m.style.maxWidth = '760px';
+  const m = document.querySelector('#modalRoot .modal'); if(m) m.style.maxWidth = '900px';
   editBillRows(); editBillRecalc();
 }
 function editBillRows(){
   document.getElementById('ebLines').innerHTML = editBill.lines.map((l,i)=>`
     <tr>
-      <td><input list="editProdNames" value="${esc(l.item_name)}" style="min-width:190px;" onchange="editBillLine(${i},'name',this.value)">
+      <td><input list="editProdNames" value="${esc(l.item_name)}" style="min-width:170px;" onchange="editBillLine(${i},'name',this.value)">
         <div class="role-note" style="font-size:11px;">${l.product_id?'linked to your product list':'not in your product list'}</div></td>
-      <td><input type="number" min="1" value="${l.qty}" style="width:70px;" oninput="editBillLine(${i},'qty',this.value)"></td>
-      <td><input type="number" step="0.01" value="${l.unit}" style="width:100px;" oninput="editBillLine(${i},'unit',this.value)"></td>
+      <td><input value="${esc(l.hsn)}" style="width:80px;" oninput="editBillLine(${i},'hsn',this.value)"></td>
+      <td><input type="number" min="1" value="${l.qty}" style="width:64px;" oninput="editBillLine(${i},'qty',this.value)"></td>
+      <td><input type="number" step="0.01" value="${l.mrp||''}" style="width:84px;" oninput="editBillLine(${i},'mrp',this.value)"></td>
+      <td><input type="number" step="0.01" value="${l.unit}" style="width:90px;" oninput="editBillLine(${i},'unit',this.value)"></td>
       <td class="num" id="ebLineTotal_${i}">${inr2(l.qty*l.unit)}</td>
       <td><button class="small secondary" onclick="editBillRemove(${i})">×</button></td>
     </tr>`).join('');
@@ -1634,14 +1790,16 @@ function editBillLine(i, field, value){
     const p = text ? matchProductForItem({sku:text, name:text}) : null;
     l.item_name = p ? p.name : text;
     l.product_id = p ? p.product_id : null;
-    if(p){ l.landing = Number(p.landing_price)||0; if(!l.unit) l.unit = Number(p.selling_price)||0; }
+    if(p){ l.landing = Number(p.landing_price)||0; if(!l.unit) l.unit = Number(p.selling_price)||0; l.hsn = hsnFor(p) || l.hsn; l.mrp = mrpFor(p); }
     editBillRows();
   }else if(field==='qty'){ l.qty = Math.max(0, parseFloat(value)||0); }
   else if(field==='unit'){ l.unit = parseFloat(value)||0; }
+  else if(field==='hsn'){ l.hsn = String(value||'').trim(); }
+  else if(field==='mrp'){ l.mrp = parseFloat(value)||0; }
   const cell = document.getElementById('ebLineTotal_'+i); if(cell) cell.textContent = inr2(l.qty*l.unit);
   editBillRecalc();
 }
-function editBillAdd(){ editBill.lines.push({product_id:null, item_name:'', qty:1, unit:0, landing:0}); editBillRows(); editBillRecalc(); }
+function editBillAdd(){ editBill.lines.push({product_id:null, item_name:'', qty:1, unit:0, landing:0, hsn:'', mrp:0}); editBillRows(); editBillRecalc(); }
 function editBillRemove(i){ editBill.lines.splice(i,1); editBillRows(); editBillRecalc(); }
 function editBillCalc(){
   const subtotal = editBill.lines.reduce((a,l)=>a+l.qty*l.unit,0);
@@ -1672,15 +1830,17 @@ async function saveEditedBill(){
 
   // customer: keep the same record, switch to another existing one, or create a new one
   const cname = document.getElementById('eb_cname').value.trim(), cphone = document.getElementById('eb_cphone').value.trim(), caddr = document.getElementById('eb_caddr').value.trim();
+  const cgstin = document.getElementById('eb_gstin').value.trim().toUpperCase();
   let customerId = null;
   if(cname){
     const existing = state.customers.find(c => String(c.name||'').trim().toLowerCase() === cname.toLowerCase());
     if(existing){
       customerId = existing.customer_id;
       const patch = {}; if(cphone && cphone!==existing.phone) patch.phone = cphone; if(caddr && caddr!==existing.address) patch.address = caddr;
+      if(cgstin && cgstin!==existing.gstin) patch.gstin = cgstin;
       if(Object.keys(patch).length) await sb.from('customers').update(patch).eq('customer_id', customerId);
     }else{
-      const {data: nc, error: ce} = await sb.from('customers').insert({name: cname, phone: cphone, address: caddr}).select().single();
+      const {data: nc, error: ce} = await sb.from('customers').insert({name: cname, phone: cphone, address: caddr, gstin: cgstin}).select().single();
       if(ce){ fail('Could not save the customer: ' + ce.message); return; }
       customerId = nc.customer_id;
     }
@@ -1689,7 +1849,8 @@ async function saveEditedBill(){
   // 1) add the new item rows first, so nothing is lost if this step fails
   const oldItems = state.saleItems.filter(i=>i.sale_id===saleId);
   const newRows = lines.map(l => ({sale_id: saleId, product_id: l.product_id, item_name: l.item_name, quantity: l.qty, unit_price: l.unit,
-    landing_price_snapshot: l.product_id ? (l.landing || l.unit) : l.unit, line_total: Math.round(l.qty*l.unit*100)/100}));
+    landing_price_snapshot: l.product_id ? (l.landing || l.unit) : l.unit, line_total: Math.round(l.qty*l.unit*100)/100,
+    hsn_code: l.hsn || null, mrp: l.mrp || null}));
   const {data: inserted, error: insErr} = await sb.from('sale_items').insert(newRows).select();
   if(insErr){ fail('Could not save the items: ' + insErr.message); return; }
 
@@ -1700,6 +1861,8 @@ async function saveEditedBill(){
     payment_method: document.getElementById('eb_payment').value.trim(), state_type: t.stateType,
     subtotal_before_discount: t.subtotal, discount_value: t.discount, final_amount: t.final,
     taxable_value: t.g.taxable, cgst_amount: t.g.cgst, sgst_amount: t.g.sgst, igst_amount: t.g.igst,
+    buyer_gstin: cgstin || null, place_of_supply: document.getElementById('eb_place').value.trim() || null,
+    notes: document.getElementById('eb_notes').value.trim() || null,
   }).eq('sale_id', saleId);
   if(upErr){
     for(const r of (inserted||[])) await sb.from('sale_items').delete().eq('sale_item_id', r.sale_item_id);
@@ -1884,6 +2047,7 @@ async function runOrderImport(){
         unit_price: it.price,
         landing_price_snapshot: p ? p.landing_price : it.price,
         line_total: it.price*it.qty,
+        hsn_code: p ? (hsnFor(p) || null) : null, mrp: p ? (mrpFor(p) || null) : null,
       };
     });
     if(items.length>0) await sb.from('sale_items').insert(items);
@@ -2131,6 +2295,8 @@ async function runOfflineImport(){
       sale_id: sale.sale_id, product_id: l.matched ? l.matched.product_id : null,
       item_name: l.matched ? l.matched.name : l.text, quantity: l.qty, unit_price: l.unit,
       landing_price_snapshot: l.matched ? l.matched.landing_price : l.unit, line_total: l.total,
+      hsn_code: l.matched ? (hsnFor(l.matched) || null) : null,
+      mrp: l.mrp || (l.matched ? mrpFor(l.matched) : null) || null,
     }));
     const {error: itemsErr} = await sb.from('sale_items').insert(items);
     if(itemsErr){
@@ -2264,7 +2430,7 @@ async function saveHistoricalSale(){
 
   const items = histCart.map(l=>{
     const p = state.products.find(p=>p.product_id===l.productId);
-    return {sale_id: sale.sale_id, product_id: p.product_id, item_name: p.name, quantity: l.qty, unit_price: l.price, landing_price_snapshot: p.landing_price, line_total: l.price*l.qty};
+    return {sale_id: sale.sale_id, product_id: p.product_id, item_name: p.name, quantity: l.qty, unit_price: l.price, landing_price_snapshot: p.landing_price, line_total: l.price*l.qty, hsn_code: hsnFor(p) || null, mrp: mrpFor(p) || null};
   });
   await sb.from('sale_items').insert(items);
   // deliberately no inventory_transactions or stock_qty change — this sale already happened before tracking started
@@ -2609,6 +2775,7 @@ async function showApp(){
   await loadAll();
 }
 async function initAuth(){
+  const lv = document.getElementById('loginVersion'); if(lv) lv.textContent = 'Version ' + APP_VERSION;
   const {data: {session}} = await sb.auth.getSession();
   if(session){
     await showApp();
