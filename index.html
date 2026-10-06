@@ -6,6 +6,7 @@
 <title>Swasole</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,500&family=Inter:wght@400;500;600;700&display=swap');
 
@@ -1327,7 +1328,7 @@ function naturalCompare(a, b){
 }
 function renderOrders(main){
   main.innerHTML = `
-    <div class="topbar"><h1>Orders</h1><div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><span class="role-note">All bills — view, print, send, or delete</span><button class="secondary" onclick="openOrderImportModal()">Import from Shopify</button><button class="secondary" onclick="openHistoricalSaleModal()">Add past offline sale</button></div></div>
+    <div class="topbar"><h1>Orders</h1><div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><span class="role-note">All bills — view, print, send, or delete</span><button class="secondary" onclick="openOrderImportModal()">Import from Shopify</button><button class="secondary" onclick="openHistoricalSaleModal()">Add past offline sale</button><button class="secondary" onclick="openOfflineImportModal()">Import offline bills (Excel)</button></div></div>
     <div class="filters">
       <div class="field"><label>Sort by</label>
         <select id="ordersSortSelect" onchange="ordersSortMode=this.value; renderOrders(document.getElementById('main'))">
@@ -1606,6 +1607,267 @@ async function runOrderImport(){
   closeModal();
   await loadAll();
   alert(`Imported ${done} orders.${unmatchedItems>0 ? ` ${unmatchedItems} line items couldn't be matched to a catalog product but were still recorded with their name.` : ''} Stock was not changed.`);
+}
+
+// ---------- OFFLINE BILLS IMPORT (Excel / CSV) ----------
+// Reads a sheet like: Invoice no | Date | Customer Name | Product | Qty | Sold at price | Mrp | Total
+// Invoice no / date / customer only need to be on the first row of each bill; "Total" rows set the bill total.
+let offlineImport = {invoices: []};
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch])); }
+function titleCase(s){ return String(s||'').trim().replace(/\s+/g,' ').toLowerCase().replace(/\b\w/g, ch => ch.toUpperCase()); }
+function toNum(v){
+  if(v===''||v===null||v===undefined) return null;
+  const n = parseFloat(String(v).replace(/[₹,\s]/g,''));
+  return isNaN(n) ? null : n;
+}
+function parseSheetDate(v){
+  // always returns a local date at 12:00 so timezone shifts can never move it to the wrong day
+  if(v instanceof Date && !isNaN(v)) return new Date(v.getFullYear(), v.getMonth(), v.getDate(), 12);
+  if(typeof v === 'number' && v > 20000 && v < 80000){
+    const d = new Date(Date.UTC(1899,11,30) + Math.round(v)*86400000); // Excel serial date
+    return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 12);
+  }
+  const s = String(v==null?'':v).trim();
+  if(!s) return null;
+  let m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/); // dd/mm/yyyy (India)
+  if(m){ let y = +m[3]; if(y<100) y += 2000; return new Date(y, +m[2]-1, +m[1], 12); }
+  m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if(m) return new Date(+m[1], +m[2]-1, +m[3], 12);
+  const d2 = new Date(s);
+  return isNaN(d2) ? null : new Date(d2.getFullYear(), d2.getMonth(), d2.getDate(), 12);
+}
+function findOfflineColumns(rows){
+  for(let i=0; i<Math.min(rows.length, 15); i++){
+    const col = {};
+    (rows[i]||[]).forEach((cell, idx)=>{
+      const h = String(cell==null?'':cell).toLowerCase().replace(/[^a-z]/g,'');
+      if(!h) return;
+      if(h.includes('mrp')){ if(col.mrp===undefined) col.mrp = idx; }
+      else if(h.includes('price') || h.includes('rate') || h.includes('soldat')){ if(col.price===undefined) col.price = idx; }
+      else if(h==='qty' || h.includes('quantity')){ if(col.qty===undefined) col.qty = idx; }
+      else if(h.includes('invoice') || h.includes('billno') || h==='bill'){ if(col.invoice===undefined) col.invoice = idx; }
+      else if(h.includes('date')){ if(col.date===undefined) col.date = idx; }
+      else if(h.includes('customer')){ if(col.customer===undefined) col.customer = idx; }
+      else if(h.includes('product') || h.includes('item') || h.includes('sku')){ if(col.product===undefined) col.product = idx; }
+      else if(h.includes('total') || h.includes('amount')){ if(col.total===undefined) col.total = idx; }
+    });
+    if(col.invoice!==undefined && col.product!==undefined) return {col, headerIdx:i};
+  }
+  throw new Error('Could not find the header row. The sheet needs columns named like "Invoice no", "Date", "Customer Name", "Product", "Qty", "Sold at price", "Total".');
+}
+function matchOfflineProduct(text){
+  return matchProductForItem({sku:text, name:text});
+}
+function buildOfflineInvoices(rows){
+  const {col, headerIdx} = findOfflineColumns(rows);
+  const get = (row, k) => col[k]!==undefined ? row[col[k]] : '';
+  const invoices = [];
+  let cur = null;
+  for(const row of rows.slice(headerIdx+1)){
+    if(!row) continue;
+    const invRaw = String(get(row,'invoice')==null?'':get(row,'invoice')).trim();
+    const productRaw = String(get(row,'product')==null?'':get(row,'product')).trim();
+    const hasTotalWord = row.some(cell => /^(grand\s*)?total$/i.test(String(cell==null?'':cell).trim()));
+    if(invRaw){
+      cur = {invoice: invRaw.toUpperCase().replace(/\s+/g,''), date: parseSheetDate(get(row,'date')),
+        customer: titleCase(get(row,'customer')), lines: [], sheetTotal: null, notes: [], status:'ready', problem:''};
+      invoices.push(cur);
+    }
+    if(!cur) continue;
+    if(hasTotalWord && !productRaw){
+      const t = toNum(get(row,'total'));
+      if(t!==null) cur.sheetTotal = t;
+      continue;
+    }
+    if(productRaw){
+      cur.lines.push({text: productRaw.replace(/\s+/g,' '), qtyRaw: toNum(get(row,'qty')),
+        price: toNum(get(row,'price')), mrp: toNum(get(row,'mrp')), lineTotalRaw: toNum(get(row,'total'))});
+    }
+  }
+  const seen = new Set();
+  const existingNums = new Set(state.sales.map(s => String(s.invoice_number||'').toUpperCase()));
+  for(const inv of invoices) resolveOfflineInvoice(inv, seen, existingNums);
+  return invoices;
+}
+function resolveOfflineInvoice(inv, seen, existingNums){
+  const fail = (msg) => { inv.status = 'problem'; inv.problem = msg; };
+  if(seen.has(inv.invoice)){ inv.status='skip'; inv.problem='Same bill number appears twice in the file'; return; }
+  seen.add(inv.invoice);
+  if(existingNums.has(inv.invoice)){ inv.status='skip'; inv.problem='Already in your system — skipped'; return; }
+  if(!inv.date){ fail('Date is missing or not readable'); return; }
+  if(inv.lines.length===0){ fail('No items found under this bill'); return; }
+
+  let assumedQty = 0;
+  inv.lines.forEach(l => {
+    l.matched = matchOfflineProduct(l.text);
+    if(l.qtyRaw===null || l.qtyRaw<=0){ l.qty = 1; assumedQty++; } else l.qty = l.qtyRaw;
+    if(l.lineTotalRaw!==null) l.total = l.lineTotalRaw;
+    else if(l.price!==null) l.total = l.qty * l.price;
+    else l.total = null;
+  });
+  if(assumedQty) inv.notes.push(`Quantity not given for ${assumedQty} item${assumedQty>1?'s':''} — assumed 1.`);
+
+  const unknown = inv.lines.filter(l => l.total===null);
+  const knownSum = inv.lines.filter(l => l.total!==null).reduce((a,l)=>a+l.total, 0);
+  if(unknown.length){
+    if(inv.sheetTotal===null){ fail('Item prices are missing and there is no Total row'); return; }
+    const remaining = inv.sheetTotal - knownSum;
+    if(remaining <= 0){ fail('Total is not higher than the prices already given'); return; }
+    // split the remaining amount across items without a price, in proportion to MRP (sheet MRP, else catalogue price)
+    let weights = unknown.map(l => l.mrp || (l.matched ? Number(l.matched.selling_price) : null) || null);
+    const known = weights.filter(w => w);
+    const fallback = known.length ? known.reduce((a,b)=>a+b,0)/known.length : 1;
+    weights = weights.map(w => w || fallback);
+    const wSum = weights.reduce((a,b)=>a+b,0);
+    let allocated = 0;
+    unknown.forEach((l, i) => {
+      const share = (i === unknown.length-1) ? Math.round((remaining - allocated)*100)/100 : Math.round(remaining*weights[i]/wSum*100)/100;
+      l.total = share; allocated += share; l.allocated = true;
+    });
+    inv.notes.push(`Item prices were not in the sheet — ₹${Math.round(remaining).toLocaleString('en-IN')} was split across ${unknown.length} item${unknown.length>1?'s':''} in proportion to their MRP. Check this one.`);
+  }
+  inv.lines.forEach(l => { l.unit = Math.round(l.total / l.qty * 100)/100; });
+
+  const subtotal = inv.lines.reduce((a,l)=>a+l.total, 0);
+  let finalAmount = inv.sheetTotal!==null ? inv.sheetTotal : subtotal;
+  let discount = 0;
+  if(inv.sheetTotal!==null && Math.abs(inv.sheetTotal - subtotal) > 0.5){
+    if(inv.sheetTotal < subtotal){
+      discount = Math.round((subtotal - inv.sheetTotal)*100)/100;
+      inv.notes.push(`Items add up to ₹${Math.round(subtotal).toLocaleString('en-IN')} but the bill total is ₹${Math.round(inv.sheetTotal).toLocaleString('en-IN')} — the difference is recorded as a discount.`);
+    }else{
+      finalAmount = inv.sheetTotal;
+      inv.notes.push(`Items add up to less than the bill total — the bill total ₹${Math.round(inv.sheetTotal).toLocaleString('en-IN')} was kept.`);
+    }
+  }
+  inv.subtotal = Math.max(subtotal, finalAmount);
+  inv.discount = inv.subtotal - finalAmount;
+  inv.finalAmount = finalAmount;
+  if(discount && Math.abs(inv.discount - discount) > 0.01) inv.discount = discount;
+  const unlinked = inv.lines.filter(l => !l.matched).length;
+  if(unlinked) inv.notes.push(`${unlinked} item${unlinked>1?'s are':' is'} not in your product list — saved by name only (won't count towards profit figures).`);
+}
+function openOfflineImportModal(){
+  offlineImport = {invoices: []};
+  openModal(`
+    <h2>Import offline bills</h2>
+    <p class="role-note">Upload your Excel (.xlsx) or CSV file with columns: <strong>Invoice no, Date, Customer Name, Product, Qty, Sold at price, Total</strong>. Invoice number, date and customer only need to be on the first row of each bill, and a row labelled "Total" sets the bill total. Product can be an SKU or a name. Bills whose number is already in the system are skipped, so it is safe to upload the same file again.</p>
+    <div class="field" style="margin-top:14px;"><input type="file" accept=".xlsx,.xls,.csv" onchange="handleOfflineFile(event)"></div>
+    <div id="offlineImportPreview"></div>
+  `);
+  const m = document.querySelector('#modalRoot .modal'); if(m) m.style.maxWidth = '960px';
+}
+function handleOfflineFile(e){
+  const file = e.target.files[0];
+  if(!file) return;
+  const out = document.getElementById('offlineImportPreview');
+  out.innerHTML = `<div class="role-note" style="margin-top:12px;">Reading file…</div>`;
+  const showError = (err) => { out.innerHTML = `<div class="statusbar err" style="margin-top:12px;">Could not read file: ${esc(err.message||err)}</div>`; };
+  const finish = (rows) => { try{ offlineImport.invoices = buildOfflineInvoices(rows); renderOfflineImportPreview(); }catch(err){ showError(err); } };
+  if(/\.csv$/i.test(file.name)){
+    Papa.parse(file, {skipEmptyLines:false, complete: (res)=> finish(res.data), error: showError});
+  }else{
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try{
+        const wb = XLSX.read(new Uint8Array(ev.target.result), {type:'array'});
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        finish(XLSX.utils.sheet_to_json(ws, {header:1, raw:true, defval:''}));
+      }catch(err){ showError(err); }
+    };
+    reader.onerror = () => showError('The file could not be opened');
+    reader.readAsArrayBuffer(file);
+  }
+}
+function renderOfflineImportPreview(){
+  const el = document.getElementById('offlineImportPreview');
+  const invs = offlineImport.invoices;
+  if(invs.length===0){ el.innerHTML = `<div class="empty">No bills found in this file.</div>`; return; }
+  const ready = invs.filter(i=>i.status==='ready');
+  const skipped = invs.filter(i=>i.status==='skip');
+  const problems = invs.filter(i=>i.status==='problem');
+  const readyTotal = ready.reduce((a,i)=>a+i.finalAmount,0);
+  const dateFmt = (d) => d ? d.toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}) : '—';
+  el.innerHTML = `
+    <div class="role-note" style="margin:14px 0;"><strong>${invs.length} bills found</strong> — ${ready.length} ready to import (${inr(readyTotal)})${skipped.length?`, ${skipped.length} skipped`:''}${problems.length?`, ${problems.length} with problems`:''}.</div>
+    <div style="max-height:46vh;overflow:auto;border:1px solid var(--line);">
+    <table>
+      <thead><tr><th>Bill</th><th>Date</th><th>Customer</th><th class="num">Items</th><th class="num">Total</th><th>Status</th></tr></thead>
+      <tbody>${invs.map(i=>`
+        <tr>
+          <td>${esc(i.invoice)}</td><td>${dateFmt(i.date)}</td><td>${esc(i.customer)||'<span class="role-note">Walk-in</span>'}</td>
+          <td class="num">${i.lines.length}</td><td class="num">${i.finalAmount!==undefined?inr(i.finalAmount):'—'}</td>
+          <td>${i.status==='ready'?'<span style="color:var(--sage)">Ready</span>':i.status==='skip'?`<span class="role-note">${esc(i.problem)}</span>`:`<span class="badge-low">${esc(i.problem)}</span>`}</td>
+        </tr>
+        ${i.status==='ready' ? i.lines.map(l=>`
+        <tr style="background:#FCFAF6;"><td></td><td colspan="2" style="font-size:12px;color:var(--ink-soft);">↳ ${esc(l.text)}${l.matched?` <span style="color:var(--sage)">→ ${esc(l.matched.name)}</span>`:' <span style="color:var(--gold-deep)">(not in product list)</span>'}</td>
+          <td class="num" style="font-size:12px;">${l.qty}</td><td class="num" style="font-size:12px;">${inr(l.total)}${l.allocated?' *':''}</td><td></td></tr>`).join('') : ''}
+        ${i.notes.length && i.status==='ready' ? `<tr><td></td><td colspan="5" style="font-size:12px;color:var(--gold-deep);">${i.notes.map(esc).join('<br>')}</td></tr>` : ''}
+      `).join('')}</tbody>
+    </table></div>
+    <label style="display:flex;align-items:center;gap:8px;margin-top:14px;font-size:13px;color:var(--ink);">
+      <input type="checkbox" id="offlineReduceStock" style="width:auto;"> Also reduce stock for these items (leave unticked if your current stock already reflects these sales)
+    </label>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;">
+      <button class="secondary" onclick="closeModal()">Cancel</button>
+      <button class="gold" id="runOfflineImportBtn" onclick="runOfflineImport()" ${ready.length?'':'disabled'}>Import ${ready.length} bill${ready.length===1?'':'s'}</button>
+    </div>`;
+}
+async function runOfflineImport(){
+  const btn = document.getElementById('runOfflineImportBtn');
+  btn.disabled = true;
+  const reduceStock = document.getElementById('offlineReduceStock').checked;
+  const todo = offlineImport.invoices.filter(i=>i.status==='ready');
+  let done = 0; const failed = [];
+  for(const inv of todo){
+    btn.textContent = `Importing ${done+failed.length+1} of ${todo.length}…`;
+    let customerId = null;
+    if(inv.customer){
+      const existing = state.customers.find(c => String(c.name||'').trim().toLowerCase() === inv.customer.toLowerCase());
+      if(existing) customerId = existing.customer_id;
+      else{
+        const {data:newCust} = await sb.from('customers').insert({name: inv.customer}).select().single();
+        if(newCust){ customerId = newCust.customer_id; state.customers.push(newCust); }
+      }
+    }
+    let gstWeighted = 0;
+    inv.lines.forEach(l => { gstWeighted += (l.matched ? Number(l.matched.gst_rate) : 3) * l.total; });
+    const lineSum = inv.lines.reduce((a,l)=>a+l.total,0);
+    const avgGst = lineSum>0 ? gstWeighted/lineSum : 3;
+    const taxable = inv.finalAmount / (1+avgGst/100);
+    const totalGst = inv.finalAmount - taxable;
+    const {data: sale, error: saleErr} = await sb.from('sales').insert({
+      invoice_number: inv.invoice, customer_id: customerId, channel: 'store', sale_date: inv.date.toISOString(),
+      subtotal_before_discount: inv.subtotal, discount_value: inv.discount, final_amount: inv.finalAmount,
+      taxable_value: taxable, cgst_amount: totalGst/2, sgst_amount: totalGst/2, igst_amount: 0,
+      state_type: 'intra-state', payment_method: 'Not recorded',
+    }).select().single();
+    if(saleErr){ failed.push(`${inv.invoice}: ${saleErr.message}`); continue; }
+    const items = inv.lines.map(l => ({
+      sale_id: sale.sale_id, product_id: l.matched ? l.matched.product_id : null,
+      item_name: l.matched ? l.matched.name : l.text, quantity: l.qty, unit_price: l.unit,
+      landing_price_snapshot: l.matched ? l.matched.landing_price : l.unit, line_total: l.total,
+    }));
+    const {error: itemsErr} = await sb.from('sale_items').insert(items);
+    if(itemsErr){
+      await sb.from('sales').delete().eq('sale_id', sale.sale_id); // never leave a bill without its items
+      failed.push(`${inv.invoice}: ${itemsErr.message}`); continue;
+    }
+    if(reduceStock){
+      for(const l of inv.lines){
+        if(!l.matched) continue;
+        await sb.from('inventory_transactions').insert({product_id: l.matched.product_id, type:'sale_out', quantity: -l.qty, reference_id: sale.sale_id, channel:'store'});
+        l.matched.stock_qty = l.matched.stock_qty - l.qty;
+        await sb.from('products').update({stock_qty: l.matched.stock_qty}).eq('product_id', l.matched.product_id);
+      }
+    }
+    done++;
+  }
+  closeModal();
+  await loadAll();
+  state.route = 'orders';
+  render();
+  alert(`Imported ${done} of ${todo.length} bills.${failed.length ? '\n\nCould not import:\n' + failed.join('\n') : ''}${reduceStock ? '' : '\n\nStock was not changed.'}`);
 }
 
 // ---------- ADD PAST OFFLINE SALE (no stock impact) ----------
