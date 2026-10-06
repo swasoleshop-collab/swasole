@@ -141,7 +141,7 @@ const NAV = [
 
 let state = { categories:[], products:[], customers:[], sales:[], saleItems:[], team:[], company:null, wholesaleAccounts:[], wholesaleOrders:[], wholesaleOrderItems:[], route:'dashboard', loaded:false, connError:null };
 const inr = (n) => '₹' + (Math.round((n||0)*100)/100).toLocaleString('en-IN',{minimumFractionDigits:0,maximumFractionDigits:2});
-const APP_VERSION = '2026.10.06-e';
+const APP_VERSION = '2026.10.06-f';
 const EXTRA_COLS = {
   products: ['hsn_code','mrp'], sale_items: ['hsn_code','mrp'], customers: ['gstin'],
   sales: ['buyer_gstin','place_of_supply','notes'], company_settings: ['default_hsn','bank_details','terms'],
@@ -1031,7 +1031,7 @@ function invoiceTotalsHtml(s){
   }
   // older bills (GST backed out of the total) keep their original layout until they are tidied
   const line = (label, val, bold) => `<div class="cart-line" ${bold?'style="font-weight:700;font-size:15px;"':''}><span>${label}</span><span class="num">${val}</span></div>`;
-  return line('Subtotal', inr2(s.subtotal_before_discount)) + line('Discount', '-' + inr2(s.discount_value)) + line('Taxable value', inr2(taxable)) +
+  return line('Subtotal', inr2(s.subtotal_before_discount)) + (Number(s.discount_value) > 0.005 ? line('Discount', '-' + inr2(s.discount_value)) : '') + line('Taxable value', inr2(taxable)) +
     (s.state_type==='inter-state' ? line('IGST', inr2(s.igst_amount)) : line('CGST', inr2(s.cgst_amount)) + line('SGST', inr2(s.sgst_amount))) +
     line('Total paid', inr2(total), true);
 }
@@ -1047,17 +1047,26 @@ function newGstFor(s){
   }
   return computeGst(s.final_amount, rate, s.state_type);
 }
-function salesNeedingGstTidy(){
-  return state.sales.filter(s => {
-    const g = newGstFor(s);
-    return Math.abs(g.taxable - Number(s.taxable_value)) > 0.005 || Math.abs(g.cgst - Number(s.cgst_amount)) > 0.005 ||
-           Math.abs(g.sgst - Number(s.sgst_amount)) > 0.005 || Math.abs(g.igst - Number(s.igst_amount)) > 0.005;
-  });
+function saleNeedsGstTidy(s){
+  const g = newGstFor(s);
+  return Math.abs(g.taxable - Number(s.taxable_value)) > 0.005 || Math.abs(g.cgst - Number(s.cgst_amount)) > 0.005 ||
+         Math.abs(g.sgst - Number(s.sgst_amount)) > 0.005 || Math.abs(g.igst - Number(s.igst_amount)) > 0.005;
+}
+function salesNeedingGstTidy(){ return state.sales.filter(saleNeedsGstTidy); }
+async function tidyOneBill(saleId){
+  const s = state.sales.find(x=>x.sale_id===saleId);
+  const g = newGstFor(s);
+  const {error} = await sb.from('sales').update({taxable_value: g.taxable, cgst_amount: g.cgst, sgst_amount: g.sgst, igst_amount: g.igst}).eq('sale_id', saleId);
+  if(error){ alert('Could not update this bill: ' + error.message); return; }
+  await loadAll();
+  state.route = 'orders'; render();
+  openOrderDetail(saleId);
 }
 async function tidyGstOnExistingBills(){
   const targets = salesNeedingGstTidy();
   if(targets.length === 0){ alert('All your bills already use the new GST layout.'); return; }
   const s0 = targets[0], g0 = newGstFor(s0);
+  const backTo = state.route;
   if(!confirm(`Update the GST figures on ${targets.length} existing bill${targets.length>1?'s':''} to the new layout?\n\n` +
     `Bill totals and customers do NOT change. Only the tax lines change — for example ${s0.invoice_number}: total stays ${inr2(s0.final_amount)}, ` +
     `taxable value becomes ${inr2(g0.taxable)} and GST becomes ${inr2(g0.tax)} (it was ${inr2(saleTaxAmount(s0))}).\n\n` +
@@ -1070,8 +1079,9 @@ async function tidyGstOnExistingBills(){
     const {error} = await sb.from('sales').update({taxable_value: g.taxable, cgst_amount: g.cgst, sgst_amount: g.sgst, igst_amount: g.igst}).eq('sale_id', s.sale_id);
     if(error) failed++; else done++;
   }
+  closeModal();
   await loadAll();
-  nav('company');
+  nav(backTo);
   alert(`Updated ${done} bill${done===1?'':'s'}.${failed ? ' ' + failed + ' could not be updated.' : ''}`);
 }
 
@@ -1655,6 +1665,7 @@ function openOrderDetail(saleId){
       mrp, qty: i.quantity, rate: Number(i.unit_price), total: Number(i.line_total)};
   });
   const saved = rows.reduce((a,r) => a + (r.mrp && r.mrp > r.rate ? (r.mrp - r.rate) * r.qty : 0), 0);
+  const showMrp = rows.some(r => r.mrp);
   const muted = 'font-size:12px;color:var(--ink-soft);margin:2px 0 0;';
   openModal(`
     <div id="printInvoice">
@@ -1673,8 +1684,8 @@ function openOrderDetail(saleId){
       <p style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.04em;margin:10px 0 4px;">Bill to</p>
       <p style="font-size:13px;margin:0;"><strong>${cust ? esc(cust.name) : 'Walk-in customer'}</strong>${cust&&cust.phone?`<br>${esc(cust.phone)}`:''}${cust&&cust.address?`<br>${esc(cust.address)}`:''}${buyerGstin?`<br>GSTIN: ${esc(buyerGstin)}`:''}</p>
       <table style="margin-top:14px;">
-        <thead><tr><th>Item</th><th>HSN</th><th class="num">Qty</th><th class="num">MRP</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead>
-        <tbody>${rows.map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.hsn)}</td><td class="num">${r.qty}</td><td class="num">${r.mrp ? inr(r.mrp) : '—'}</td><td class="num">${inr(r.rate)}</td><td class="num">${inr(r.total)}</td></tr>`).join('')}</tbody>
+        <thead><tr><th>Item</th><th>HSN</th><th class="num">Qty</th>${showMrp ? '<th class="num">MRP</th>' : ''}<th class="num">Rate</th><th class="num">Amount</th></tr></thead>
+        <tbody>${rows.map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.hsn)}</td><td class="num">${r.qty}</td>${showMrp ? `<td class="num">${r.mrp ? inr(r.mrp) : '—'}</td>` : ''}<td class="num">${inr(r.rate)}</td><td class="num">${inr(r.total)}</td></tr>`).join('')}</tbody>
       </table>
       <div class="hairline"></div>
       ${invoiceTotalsHtml(s)}
@@ -1688,6 +1699,8 @@ function openOrderDetail(saleId){
       </div>
       <p style="text-align:center;font-size:12px;color:var(--ink-soft);margin-top:18px;">Thank you for shopping with ${esc(co.company_name || 'Swasole')}!</p>
     </div>
+    ${saleNeedsGstTidy(s) ? `<div class="no-print statusbar" style="border-color:var(--gold);color:var(--gold-deep);margin-top:14px;"><span>This bill still uses the older GST layout.</span><span style="display:flex;gap:6px;"><button class="small gold" onclick="tidyOneBill('${s.sale_id}')">Fix this bill</button><button class="small secondary" onclick="tidyGstOnExistingBills()">Fix all older bills</button></span></div>` : ''}
+    ${rows.some(r => r.hsn === '—') ? `<div class="no-print role-note" style="margin-top:10px;">HSN is missing on some items. Set it once for everything under Company, then HSN code, then Apply to all (or change it for this bill with Edit bill).</div>` : ''}
     <div class="hairline no-print"></div>
     <div class="no-print field">
       <label>Bill number (edit to match your own numbering)</label>
