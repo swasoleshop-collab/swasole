@@ -85,12 +85,18 @@ tr:hover td{background:#FCFAF6;}
   .pos-grid{grid-template-columns:1fr;}
   .grid2,.grid3{grid-template-columns:1fr;}
 }
+@page{margin:12mm;}
 @media print{
-  body *{visibility:hidden;}
-  #printInvoice, #printInvoice *{visibility:visible;}
-  #printInvoice{position:absolute;top:0;left:0;width:100%;padding:20px;}
-  .modal-backdrop{position:static;background:none;padding:0;}
-  .modal{box-shadow:none;max-width:none;padding:0;}
+  .no-print{display:none !important;}
+  /* printing a bill (opened in a window) */
+  body.print-modal > *:not(#modalRoot){display:none !important;}
+  body.print-modal .modal-backdrop{position:static !important;display:block !important;background:none !important;padding:0 !important;}
+  body.print-modal .modal{box-shadow:none !important;max-width:none !important;width:100% !important;padding:0 !important;max-height:none !important;overflow:visible !important;}
+  /* printing a report (shown on the page itself) */
+  body.print-page .sidebar, body.print-page .mobile-tabs, body.print-page #modalRoot, body.print-page #loginScreen,
+  body.print-page .main > .topbar, body.print-page .main > .filters{display:none !important;}
+  body.print-page .app{display:block !important;}
+  body.print-page .main{padding:0 !important;max-width:none !important;}
 }
 </style>
 </head>
@@ -141,7 +147,7 @@ const NAV = [
 
 let state = { categories:[], products:[], customers:[], sales:[], saleItems:[], team:[], company:null, wholesaleAccounts:[], wholesaleOrders:[], wholesaleOrderItems:[], route:'dashboard', loaded:false, connError:null };
 const inr = (n) => '₹' + (Math.round((n||0)*100)/100).toLocaleString('en-IN',{minimumFractionDigits:0,maximumFractionDigits:2});
-const APP_VERSION = '2026.10.06-g';
+const APP_VERSION = '2026.10.06-i';
 const EXTRA_COLS = {
   products: ['hsn_code','mrp'], sale_items: ['hsn_code','mrp'], customers: ['gstin'],
   sales: ['buyer_gstin','place_of_supply','notes'], company_settings: ['default_hsn','bank_details','terms'],
@@ -153,6 +159,17 @@ function stripExtras(table, payload){
   return Array.isArray(payload) ? payload.map(strip) : strip(payload);
 }
 const INDIAN_STATES = {'01':'Jammu & Kashmir','02':'Himachal Pradesh','03':'Punjab','04':'Chandigarh','05':'Uttarakhand','06':'Haryana','07':'Delhi','08':'Rajasthan','09':'Uttar Pradesh','10':'Bihar','11':'Sikkim','12':'Arunachal Pradesh','13':'Nagaland','14':'Manipur','15':'Mizoram','16':'Tripura','17':'Meghalaya','18':'Assam','19':'West Bengal','20':'Jharkhand','21':'Odisha','22':'Chhattisgarh','23':'Madhya Pradesh','24':'Gujarat','26':'Dadra & Nagar Haveli and Daman & Diu','27':'Maharashtra','29':'Karnataka','30':'Goa','31':'Lakshadweep','32':'Kerala','33':'Tamil Nadu','34':'Puducherry','35':'Andaman & Nicobar Islands','36':'Telangana','37':'Andhra Pradesh','38':'Ladakh'};
+function guessPlaceOfSupply(text){
+  const t = String(text||'');
+  if(!t.trim()) return '';
+  const byLength = Object.entries(INDIAN_STATES).sort((a,b) => b[1].length - a[1].length);
+  for(const [code, name] of byLength){
+    if(new RegExp('\\b' + name.replace(/ & /g, ' (?:&|and) ') + '\\b', 'i').test(t)) return `${name} (${code})`;
+  }
+  const abbr = {UP:'09', 'U.P.':'09', MP:'23', HR:'06', DL:'07', RJ:'08', MH:'27', GJ:'24', KA:'29', TN:'33', WB:'19', PB:'03'};
+  const m = t.match(/(?:^|[^A-Za-z.])(UP|U\.P\.|MP|HR|DL|RJ|MH|GJ|KA|TN|WB|PB)(?![A-Za-z])/);
+  return m ? `${INDIAN_STATES[abbr[m[1]]]} (${abbr[m[1]]})` : '';
+}
 function stateLabelFromGstin(g){ const code = String(g||'').trim().slice(0,2); return INDIAN_STATES[code] ? `${INDIAN_STATES[code]} (${code})` : ''; }
 function companyStateLabel(){ return stateLabelFromGstin(state.company && state.company.gstin); }
 function hsnFor(p){ return (p && p.hsn_code) || (state.company && state.company.default_hsn) || ''; }
@@ -213,7 +230,10 @@ function billTotalsHtml(b){ // b: {subtotal, taxable, cgst, sgst, igst, ratePct,
   const rateLabel = b.ratePct ? ` (${Number(b.ratePct)}%)` : '';
   const halfLabel = b.ratePct ? ` (${Number(b.ratePct)/2}%)` : '';
   let html = '';
-  if(discount > 0.005) html += line('Subtotal', inr2(subtotal)) + line('Discount', '-' + inr2(discount));
+  if(discount > 0.005){
+    const pct = Math.round(discount / subtotal * 10000) / 100;     // e.g. 2.91
+    html += line('Subtotal', inr2(subtotal)) + line(`Discount (${pct}%)`, '-' + inr2(discount));
+  }
   if(tax > 0.005){
     html += line('Taxable value', inr2(taxable));
     html += b.stateType === 'inter-state'
@@ -1734,6 +1754,9 @@ async function updateInvoiceNumber(saleId){
   openOrderDetail(saleId);
 }
 function printInvoice(){
+  const inWindow = !!document.querySelector('#modalRoot #printInvoice');
+  document.body.classList.add(inWindow ? 'print-modal' : 'print-page');
+  window.addEventListener('afterprint', () => document.body.classList.remove('print-modal', 'print-page'), {once:true});
   window.print();
 }
 function sendInvoiceWhatsApp(saleId){
@@ -1784,11 +1807,12 @@ function openEditBillModal(saleId){
       <div class="field"><label>Phone</label><input id="eb_cphone" value="${esc(cust?cust.phone||'':'')}"></div>
     </div>
     <datalist id="ebCustNames">${state.customers.map(c=>`<option value="${esc(c.name)}">`).join('')}</datalist>
-    <div class="field"><label>Address</label><input id="eb_caddr" value="${esc(cust?cust.address||'':'')}"></div>
+    <div class="field"><label>Address</label><input id="eb_caddr" value="${esc(cust?cust.address||'':'')}" oninput="editBillPlaceHint()"></div>
     <div class="grid2">
       <div class="field"><label>Customer GSTIN</label><input id="eb_gstin" value="${esc(s.buyer_gstin || (cust&&cust.gstin) || '')}"></div>
-      <div class="field"><label>Place of supply</label><input id="eb_place" value="${esc(s.place_of_supply||'')}"></div>
+      <div class="field"><label>Place of supply</label><input id="eb_place" value="${esc(s.place_of_supply||'')}" oninput="editBillPlaceHint()"></div>
     </div>
+    <div id="ebPlaceHint"></div>
     <div class="grid3">
       <div class="field"><label>Sold through</label><select id="eb_channel">${['store','online','wholesale'].map(x=>`<option ${s.channel===x?'selected':''}>${x}</option>`).join('')}</select></div>
       <div class="field"><label>Payment</label><input id="eb_payment" value="${esc(s.payment_method||'')}"></div>
@@ -1810,7 +1834,14 @@ function openEditBillModal(saleId){
       <button class="gold" id="ebSaveBtn" onclick="saveEditedBill()">Save changes</button>
     </div>`);
   const m = document.querySelector('#modalRoot .modal'); if(m) m.style.maxWidth = '900px';
-  editBillRows(); editBillRecalc();
+  editBillRows(); editBillRecalc(); editBillPlaceHint();
+}
+function editBillPlaceHint(){
+  const el = document.getElementById('ebPlaceHint'); if(!el) return;
+  const current = document.getElementById('eb_place').value.trim();
+  const guess = guessPlaceOfSupply(document.getElementById('eb_caddr').value);
+  el.innerHTML = (!current && guess)
+    ? `<div class="role-note" style="margin:-6px 0 12px;">The address looks like <strong>${esc(guess)}</strong>. <button class="small secondary" onclick="document.getElementById('eb_place').value = this.dataset.v; editBillPlaceHint();" data-v="${esc(guess)}">Use as place of supply</button></div>` : '';
 }
 function editBillRows(){
   document.getElementById('ebLines').innerHTML = editBill.lines.map((l,i)=>`
