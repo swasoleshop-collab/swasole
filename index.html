@@ -141,7 +141,7 @@ const NAV = [
 
 let state = { categories:[], products:[], customers:[], sales:[], saleItems:[], team:[], company:null, wholesaleAccounts:[], wholesaleOrders:[], wholesaleOrderItems:[], route:'dashboard', loaded:false, connError:null };
 const inr = (n) => '₹' + (Math.round((n||0)*100)/100).toLocaleString('en-IN',{minimumFractionDigits:0,maximumFractionDigits:2});
-const APP_VERSION = '2026.10.06-f';
+const APP_VERSION = '2026.10.06-g';
 const EXTRA_COLS = {
   products: ['hsn_code','mrp'], sale_items: ['hsn_code','mrp'], customers: ['gstin'],
   sales: ['buyer_gstin','place_of_supply','notes'], company_settings: ['default_hsn','bank_details','terms'],
@@ -190,35 +190,37 @@ function suggestNextBillNumber(){
   return best.prefix + best.sep + String(best.n + 1).padStart(best.width, '0');
 }
 const inr2 = (n) => '₹' + (Number(n)||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
-// GST is shown ON TOP of the price paid, then cancelled by an equal "GST discount", so the total never changes.
-// taxable value = the amount the customer pays (after any real discount); tax = rate x that amount.
+// The amount the customer pays (finalAmount) already includes GST. Taxable value = finalAmount / (1 + rate),
+// so a bill reads: Subtotal - Discount = Taxable value, + GST = Total, and the total never changes.
 function computeGst(finalAmount, ratePct, stateType){
-  const F = Number(finalAmount)||0, r = Number(ratePct)||0;
+  const r2 = (x) => Math.round((Number(x)||0)*100)/100;
+  const F = r2(finalAmount), r = Number(ratePct)||0;
+  const taxable = r > 0 ? r2(F / (1 + r/100)) : F;
+  const tax = r2(F - taxable);
   const intra = stateType !== 'inter-state';
-  const half = Math.round(F * r / 200 * 100) / 100;
-  const cgst = intra ? half : 0, sgst = intra ? half : 0;
-  const igst = intra ? 0 : Math.round(F * r / 100 * 100) / 100;
-  return {taxable: F, cgst, sgst, igst, tax: cgst + sgst + igst};
+  const cgst = intra ? r2(tax/2) : 0;
+  const sgst = intra ? r2(tax - cgst) : 0;
+  const igst = intra ? 0 : tax;
+  return {taxable, cgst, sgst, igst, tax};
 }
 // the lines that go under the item list on a bill: used by the POS cart and the printed invoice
-function billTotalsHtml(b){ // b: {subtotal, discount, taxable, cgst, sgst, igst, ratePct, stateType, total}
+function billTotalsHtml(b){ // b: {subtotal, taxable, cgst, sgst, igst, ratePct, stateType, total}
   const tax = (Number(b.cgst)||0) + (Number(b.sgst)||0) + (Number(b.igst)||0);
+  const total = Number(b.total)||0, taxable = Number(b.taxable)||0;
+  const subtotal = Math.max(Number(b.subtotal)||0, total);
+  const discount = Math.round((subtotal - taxable)*100)/100;   // everything between the subtotal and the taxable value
   const line = (label, val, bold) => `<div class="cart-line" ${bold?'style="font-weight:700;font-size:15px;"':''}><span>${label}</span><span class="num">${val}</span></div>`;
-  const hasDiscount = Number(b.discount) > 0.005;
   const rateLabel = b.ratePct ? ` (${Number(b.ratePct)}%)` : '';
   const halfLabel = b.ratePct ? ` (${Number(b.ratePct)/2}%)` : '';
   let html = '';
-  if(hasDiscount){
-    html += line('Subtotal', inr2(b.subtotal)) + line('Discount', '-' + inr2(b.discount));
-  }
-  html += line('Taxable value', inr2(b.taxable));
+  if(discount > 0.005) html += line('Subtotal', inr2(subtotal)) + line('Discount', '-' + inr2(discount));
   if(tax > 0.005){
+    html += line('Taxable value', inr2(taxable));
     html += b.stateType === 'inter-state'
       ? line('IGST' + rateLabel, inr2(b.igst))
       : line('CGST' + halfLabel, inr2(b.cgst)) + line('SGST' + halfLabel, inr2(b.sgst));
-    html += line('Discount equal to GST' + rateLabel, '-' + inr2(tax));
   }
-  html += line('Total paid', inr2(b.total), true);
+  html += line('Total paid', inr2(total), true);
   return html;
 }
 
@@ -1022,35 +1024,32 @@ async function toggleTeamStatus(id, currentStatus){
 // ---------- invoice totals + one-time GST tidy-up for older bills ----------
 function saleTaxAmount(s){ return (Number(s.cgst_amount)||0) + (Number(s.sgst_amount)||0) + (Number(s.igst_amount)||0); }
 function invoiceTotalsHtml(s){
-  const tax = saleTaxAmount(s), taxable = Number(s.taxable_value)||0, total = Number(s.final_amount)||0;
-  const cleanStyle = Math.abs(taxable - total) < 0.011;   // new style: tax shown on the price, cancelled by an equal discount
-  if(cleanStyle){
-    const ratePct = taxable>0 ? Math.round(tax/taxable*10000)/100 : 0;
-    return billTotalsHtml({subtotal:s.subtotal_before_discount, discount:s.discount_value, taxable, cgst:s.cgst_amount, sgst:s.sgst_amount,
-      igst:s.igst_amount, ratePct, stateType:s.state_type, total});
-  }
-  // older bills (GST backed out of the total) keep their original layout until they are tidied
-  const line = (label, val, bold) => `<div class="cart-line" ${bold?'style="font-weight:700;font-size:15px;"':''}><span>${label}</span><span class="num">${val}</span></div>`;
-  return line('Subtotal', inr2(s.subtotal_before_discount)) + (Number(s.discount_value) > 0.005 ? line('Discount', '-' + inr2(s.discount_value)) : '') + line('Taxable value', inr2(taxable)) +
-    (s.state_type==='inter-state' ? line('IGST', inr2(s.igst_amount)) : line('CGST', inr2(s.cgst_amount)) + line('SGST', inr2(s.sgst_amount))) +
-    line('Total paid', inr2(total), true);
+  const g = newGstFor(s);   // worked out from the amount paid, so every bill reads the same way
+  return billTotalsHtml({subtotal: s.subtotal_before_discount, taxable: g.taxable, cgst: g.cgst, sgst: g.sgst, igst: g.igst,
+    ratePct: g.rate, stateType: s.state_type, total: s.final_amount});
 }
 function newGstFor(s){
   const tax = saleTaxAmount(s), taxable = Number(s.taxable_value)||0;
   let rate;
-  if(tax > 0.005 && taxable > 0) rate = Math.round(tax/taxable*10000)/100;       // keep the rate the bill already used
-  else{                                                                              // bill had no GST recorded: use the items' own rates (default 3%)
+  if(tax > 0.005 && taxable > 0){
+    rate = tax/taxable*100;                                   // keep the rate the bill already used
+    const snap = Math.round(rate*4)/4;                         // tidy 3.008 -> 3
+    rate = Math.abs(rate - snap) < 0.1 ? snap : Math.round(rate*100)/100;
+  }else{                                                       // bill had no GST recorded: use the items' own rates (default 3%)
     const items = state.saleItems.filter(i => i.sale_id === s.sale_id);
     const sum = items.reduce((a,i)=>a+Number(i.line_total),0);
     const w = items.reduce((a,i)=>{ const p = state.products.find(p=>p.product_id===i.product_id); return a + (p ? Number(p.gst_rate) : 3) * Number(i.line_total); },0);
     rate = sum>0 ? Math.round(w/sum*100)/100 : 3;
   }
-  return computeGst(s.final_amount, rate, s.state_type);
+  const g = computeGst(s.final_amount, rate, s.state_type);
+  g.rate = rate;
+  return g;
 }
 function saleNeedsGstTidy(s){
   const g = newGstFor(s);
-  return Math.abs(g.taxable - Number(s.taxable_value)) > 0.005 || Math.abs(g.cgst - Number(s.cgst_amount)) > 0.005 ||
-         Math.abs(g.sgst - Number(s.sgst_amount)) > 0.005 || Math.abs(g.igst - Number(s.igst_amount)) > 0.005;
+  // a difference of one paisa (rounding) is not worth flagging
+  return Math.abs(g.taxable - Number(s.taxable_value)) > 0.011 || Math.abs(g.cgst - Number(s.cgst_amount)) > 0.011 ||
+         Math.abs(g.sgst - Number(s.sgst_amount)) > 0.011 || Math.abs(g.igst - Number(s.igst_amount)) > 0.011;
 }
 function salesNeedingGstTidy(){ return state.sales.filter(saleNeedsGstTidy); }
 async function tidyOneBill(saleId){
@@ -1067,9 +1066,9 @@ async function tidyGstOnExistingBills(){
   if(targets.length === 0){ alert('All your bills already use the new GST layout.'); return; }
   const s0 = targets[0], g0 = newGstFor(s0);
   const backTo = state.route;
-  if(!confirm(`Update the GST figures on ${targets.length} existing bill${targets.length>1?'s':''} to the new layout?\n\n` +
+  if(!confirm(`Update the saved GST figures on ${targets.length} existing bill${targets.length>1?'s':''}?\n\n` +
     `Bill totals and customers do NOT change. Only the tax lines change — for example ${s0.invoice_number}: total stays ${inr2(s0.final_amount)}, ` +
-    `taxable value becomes ${inr2(g0.taxable)} and GST becomes ${inr2(g0.tax)} (it was ${inr2(saleTaxAmount(s0))}).\n\n` +
+    `taxable value becomes ${inr2(g0.taxable)} and GST becomes ${inr2(g0.tax)} (it was ${inr2(saleTaxAmount(s0))}, taxable ${inr2(s0.taxable_value)}).\n\n` +
     `The GST figures in Reports and the CSV export will change to match. Continue?`)) return;
   const btn = document.getElementById('tidyGstBtn'); if(btn){ btn.disabled = true; }
   let done = 0, failed = 0;
@@ -1111,8 +1110,8 @@ function renderCompany(main){
     <div style="display:flex;gap:8px;max-width:380px;"><input id="bulkHsn" value="7117"><button class="secondary" id="applyHsnBtn" onclick="applyHsnToAll()">Apply to all</button></div>
     <div class="hairline"></div>
     <div class="section-title">Bills</div>
-    <p class="role-note" style="margin-bottom:14px;">New bills show GST on the price with an equal discount, so the total never changes. Use this once to bring bills made earlier (including imported ones) to the same layout. Bill totals stay exactly as they are.</p>
-    <button class="secondary" id="tidyGstBtn" onclick="tidyGstOnExistingBills()">Update GST layout on existing bills</button>
+    <p class="role-note" style="margin-bottom:14px;">Bills read: Subtotal, Discount, Taxable value, GST, Total. The discount comes off the subtotal and GST is worked out after it, and the total never changes. Use this once to bring the saved GST figures of earlier bills (including imported ones) to the same method, so Reports match the bills. Bill totals stay exactly as they are.</p>
+    <button class="secondary" id="tidyGstBtn" onclick="tidyGstOnExistingBills()">Update GST figures on existing bills</button>
     <div class="hairline"></div>
     <div class="section-title">Backup</div>
     <p class="role-note" style="margin-bottom:14px;">Downloads everything — products, categories, customers, sales, team, wholesale accounts — as one file. Works even if you can't access your Supabase dashboard, since this uses the app's own data connection. Keep a copy somewhere safe.</p>
@@ -1619,7 +1618,7 @@ function naturalCompare(a, b){
 function renderOrders(main){
   main.innerHTML = `
     <div class="topbar"><h1>Orders</h1><div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><span class="role-note">All bills — view, print, send, or delete</span><button class="secondary" onclick="openOrderImportModal()">Import from Shopify</button><button class="secondary" onclick="openHistoricalSaleModal()">Add past offline sale</button><button class="secondary" onclick="openOfflineImportModal()">Import offline bills (Excel)</button></div></div>
-    ${salesNeedingGstTidy().length ? `<div class="statusbar" style="border-color:var(--gold);color:var(--gold-deep);"><span>${salesNeedingGstTidy().length} older bill${salesNeedingGstTidy().length>1?'s use':' uses'} the previous GST layout.</span><button class="small gold" onclick="tidyGstOnExistingBills()">Update them now</button></div>` : ''}
+    ${salesNeedingGstTidy().length ? `<div class="statusbar" style="border-color:var(--gold);color:var(--gold-deep);"><span>${salesNeedingGstTidy().length} bill${salesNeedingGstTidy().length>1?'s have':' has'} GST figures saved with an earlier method.</span><button class="small gold" onclick="tidyGstOnExistingBills()">Update them now</button></div>` : ''}
     <div class="filters">
       <div class="field"><label>Sort by</label>
         <select id="ordersSortSelect" onchange="ordersSortMode=this.value; renderOrders(document.getElementById('main'))">
@@ -1699,7 +1698,7 @@ function openOrderDetail(saleId){
       </div>
       <p style="text-align:center;font-size:12px;color:var(--ink-soft);margin-top:18px;">Thank you for shopping with ${esc(co.company_name || 'Swasole')}!</p>
     </div>
-    ${saleNeedsGstTidy(s) ? `<div class="no-print statusbar" style="border-color:var(--gold);color:var(--gold-deep);margin-top:14px;"><span>This bill still uses the older GST layout.</span><span style="display:flex;gap:6px;"><button class="small gold" onclick="tidyOneBill('${s.sale_id}')">Fix this bill</button><button class="small secondary" onclick="tidyGstOnExistingBills()">Fix all older bills</button></span></div>` : ''}
+    ${saleNeedsGstTidy(s) ? `<div class="no-print statusbar" style="border-color:var(--gold);color:var(--gold-deep);margin-top:14px;"><span>This bill's saved GST figures use an earlier method (the bill above is already shown correctly).</span><span style="display:flex;gap:6px;"><button class="small gold" onclick="tidyOneBill('${s.sale_id}')">Fix this bill</button><button class="small secondary" onclick="tidyGstOnExistingBills()">Fix all bills</button></span></div>` : ''}
     ${rows.some(r => r.hsn === '—') ? `<div class="no-print role-note" style="margin-top:10px;">HSN is missing on some items. Set it once for everything under Company, then HSN code, then Apply to all (or change it for this bill with Edit bill).</div>` : ''}
     <div class="hairline no-print"></div>
     <div class="no-print field">
@@ -2575,7 +2574,7 @@ function renderReportBody(){
 function downloadReportCsv(){
   const sales = [...reportPeriodSales()].sort((a,b)=>new Date(a.sale_date)-new Date(b.sale_date));
   const periodLabel = reportMode==='monthly' ? reportMonth : String(reportYear);
-  const header = ['Bill Number','Date','Customer','Channel','Payment Method','Subtotal','Discount','Taxable Value','CGST','SGST','IGST','Total'];
+  const header = ['Bill Number','Date','Customer','Channel','Payment Method','Subtotal','Discount','Discount on bill','Taxable Value','CGST','SGST','IGST','Total'];
   const rows = sales.map(s=>{
     const cust = state.customers.find(c=>c.customer_id===s.customer_id);
     return [
@@ -2586,6 +2585,7 @@ function downloadReportCsv(){
       s.payment_method || '',
       s.subtotal_before_discount,
       s.discount_value,
+      Math.round((Math.max(Number(s.subtotal_before_discount), Number(s.final_amount)) - Number(s.taxable_value))*100)/100,
       s.taxable_value,
       s.cgst_amount,
       s.sgst_amount,
