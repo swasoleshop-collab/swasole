@@ -85,18 +85,18 @@ tr:hover td{background:#FCFAF6;}
   .pos-grid{grid-template-columns:1fr;}
   .grid2,.grid3{grid-template-columns:1fr;}
 }
-@page{margin:12mm;}
+@page{margin:0;} /* margin 0 stops Chrome printing its own date/title header and footer on bills */
 @media print{
   .no-print{display:none !important;}
   /* printing a bill (opened in a window) */
   body.print-modal > *:not(#modalRoot){display:none !important;}
-  body.print-modal .modal-backdrop{position:static !important;display:block !important;background:none !important;padding:0 !important;}
+  body.print-modal .modal-backdrop{position:static !important;display:block !important;background:none !important;padding:9mm !important;}
   body.print-modal .modal{box-shadow:none !important;max-width:none !important;width:100% !important;padding:0 !important;max-height:none !important;overflow:visible !important;}
   /* printing a report (shown on the page itself) */
   body.print-page .sidebar, body.print-page .mobile-tabs, body.print-page #modalRoot, body.print-page #loginScreen,
   body.print-page .main > .topbar, body.print-page .main > .filters{display:none !important;}
   body.print-page .app{display:block !important;}
-  body.print-page .main{padding:0 !important;max-width:none !important;}
+  body.print-page .main{padding:9mm !important;max-width:none !important;}
 }
 </style>
 </head>
@@ -147,7 +147,7 @@ const NAV = [
 
 let state = { categories:[], products:[], customers:[], sales:[], saleItems:[], team:[], company:null, wholesaleAccounts:[], wholesaleOrders:[], wholesaleOrderItems:[], route:'dashboard', loaded:false, connError:null };
 const inr = (n) => '₹' + (Math.round((n||0)*100)/100).toLocaleString('en-IN',{minimumFractionDigits:0,maximumFractionDigits:2});
-const APP_VERSION = '2026.10.06-i';
+const APP_VERSION = '2026.10.12-a';
 const EXTRA_COLS = {
   products: ['hsn_code','mrp'], sale_items: ['hsn_code','mrp'], customers: ['gstin'],
   sales: ['buyer_gstin','place_of_supply','notes'], company_settings: ['default_hsn','bank_details','terms'],
